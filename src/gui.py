@@ -16,8 +16,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QObject, QSettings, QThread, QTimer, QUrl, Qt, Signal
-from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtCore import (
+    QObject, QRectF, QSettings, QThread, QTimer, QUrl, Qt, Signal,
+)
+from PySide6.QtGui import (
+    QBrush, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -34,6 +38,8 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QPlainTextEdit,
+    QSizePolicy,
+    QSlider,
     QSpinBox,
     QStatusBar,
     QStyle,
@@ -166,6 +172,148 @@ class ResetButton(QToolButton):
         self.setVisible(self._read() != self._default)
 
 
+class ZoomBar(QWidget):
+    """Zoom as a drag bar, with the factor it is sitting on beside it.
+
+    Qt sliders are integer-only and zoom is not, so the slider counts in the
+    fractions below and everything outside this class keeps talking in the
+    float the pipeline actually takes. The readout is not decoration: dragging a bare bar
+    tells you nothing about the number you landed on.
+    """
+
+    valueChanged = Signal(float)
+
+    # Thousandths rather than the hundredths the spin box used to step in. It
+    # is finer than anyone drags, and that is the point: the pixel boxes below
+    # can only land on a size the bar can represent, and at 1/100 a typed 1920
+    # snapped to 1912.
+    STEPS_PER_UNIT = 1000
+
+    def __init__(self, *, low: float, high: float, value: float, step: float) -> None:
+        super().__init__()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setRange(self._raw(low), self._raw(high))
+        self.slider.setSingleStep(self._raw(step))
+        self.slider.setPageStep(self._raw(step) * 2)
+        self.slider.setValue(self._raw(value))
+        self.slider.setMinimumWidth(150)
+
+        self._readout = QLabel()
+        # Fixed width, so the bar does not twitch sideways as the number under
+        # it goes from 0.5 to 1.25 mid-drag.
+        self._readout.setFixedWidth(40)
+        self._readout.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+        row.addWidget(self.slider, stretch=1)
+        row.addWidget(self._readout)
+
+        self.slider.valueChanged.connect(self._relay)
+        self._show()
+
+    @classmethod
+    def _raw(cls, zoom: float) -> int:
+        return round(float(zoom) * cls.STEPS_PER_UNIT)
+
+    def value(self) -> float:
+        return self.slider.value() / self.STEPS_PER_UNIT
+
+    def setValue(self, zoom: float) -> None:  # noqa: N802 -- matches QSpinBox
+        self.slider.setValue(self._raw(zoom))
+
+    def _relay(self, _raw: int) -> None:
+        self._show()
+        self.valueChanged.emit(self.value())
+
+    def _show(self) -> None:
+        # %g, not a fixed 2dp: the bar is finer than 2dp now, and a readout
+        # that rounded would disagree with the pixels underneath it.
+        self._readout.setText(f"{self.value():g}")
+
+
+class ScaledSize(QWidget):
+    """The zoom said in pixels -- the size the source is scaled to on canvas.
+
+    Two boxes for one degree of freedom: the aspect is the source's, so
+    whichever one is typed in settles the other. Neither holds state. Both
+    write back a zoom and then wait to be told what that zoom worked out to,
+    which is how a width that is not reachable -- an odd number, or one that
+    falls between two slider steps -- comes back corrected instead of sticking.
+    """
+
+    zoomEdited = Signal(float)
+
+    def __init__(self, canvas_h: int, source: tuple[int, int]) -> None:
+        super().__init__()
+        self._canvas_h = canvas_h
+        self._source = source
+        self._echo = False  # set while writing our own boxes, so they stay quiet
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+
+        self.width_spin = self._box("Width of the scaled clip, in pixels.")
+        self.height_spin = self._box(
+            "Height of the scaled clip, in pixels. The canvas is "
+            f"{canvas_h}px tall, so that is where zoom 1.0 lands."
+        )
+        row.addWidget(self.width_spin)
+        row.addWidget(QLabel("×"))
+        row.addWidget(self.height_spin)
+        row.addStretch(1)
+
+        self.width_spin.valueChanged.connect(self._from_width)
+        self.height_spin.valueChanged.connect(self._from_height)
+
+    def _box(self, tip: str) -> QSpinBox:
+        spin = QSpinBox()
+        # Wider than any canvas either dimension can reach at the slider's top
+        # end, on any source aspect worth feeding it.
+        spin.setRange(2, 99999)
+        spin.setSingleStep(2)  # yuv420p wants even numbers; odd ones round anyway
+        spin.setSuffix(" px")
+        spin.setMinimumWidth(84)
+        spin.setToolTip(tip)
+        # Without this every keystroke of "1080" is its own value -- 1, then
+        # 10, then 108 -- each one moving the zoom and rewriting the other box
+        # out from under the cursor.
+        spin.setKeyboardTracking(False)
+        return spin
+
+    def set_source(self, source: tuple[int, int]) -> None:
+        self._source = source
+
+    def show_zoom(self, zoom: float) -> None:
+        """Display what `zoom` comes to against the current source."""
+        source_w, source_h = self._source
+        scale_w, scale_h = shorts.scaled_size(source_w, source_h, self._canvas_h, zoom)
+        self._echo = True
+        try:
+            self.width_spin.setValue(scale_w)
+            self.height_spin.setValue(scale_h)
+        finally:
+            self._echo = False
+
+    def _from_width(self, value: int) -> None:
+        if self._echo:
+            return
+        source_w, source_h = self._source
+        self.zoomEdited.emit(
+            shorts.zoom_for_width(value, source_w, source_h, self._canvas_h)
+        )
+
+    def _from_height(self, value: int) -> None:
+        if self._echo:
+            return
+        self.zoomEdited.emit(shorts.zoom_for_height(value, self._canvas_h))
+
+
 class PreviewDialog(QDialog):
     """A rendered still, scaled to fit on screen.
 
@@ -211,6 +359,245 @@ class PreviewDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class FramingPreview(QWidget):
+    """The framing, drawn to scale: what the crop keeps and what comes out.
+
+    Two diagrams, because the interesting thing is the relationship between
+    them. On top, the source frame at its real aspect with the region that
+    survives the centre-crop picked out; below, the 1080x1920 canvas with that
+    region placed on it and the blur-filled bars above and below.
+
+    It is geometry, not a render -- `shorts.plan` resolves exactly the same
+    Layout the encode will use, so the boxes are true to the pixel even though
+    nothing has been decoded. That is the point: it answers "how much am I
+    throwing away" before a frame is read, which the real preview cannot do
+    without paying ffmpeg for a frame.
+    """
+
+    # Sized so the portrait diagram is still readable. Below this the two
+    # boxes stop saying anything useful -- and the height is what the window's
+    # own floor ends up being set from, since this is the tallest thing on the
+    # page: 1080x1920 drawn small enough to fit a short panel is a sliver.
+    MIN_WIDTH = 260
+    MIN_HEIGHT = 520
+
+    # The source box's ceiling, as a fraction of the panel. Deliberately mean:
+    # a landscape frame says what it needs to in a short strip, and every pixel
+    # it does not take goes to the portrait diagram, which needs them.
+    SOURCE_SHARE = 0.22
+
+    BACKDROP = QColor("#000000")
+    FRAME_FILL = QColor("#141414")  # the source, before anything is kept
+    FRAME_EDGE = QColor("#4a4a4a")
+    KEPT_FILL = QColor(36, 161, 72, 70)  # the progress bar's green, at 27%
+    KEPT_EDGE = QColor("#24a148")
+    CAPTION = QColor("#e6e6e6")
+    DETAIL = QColor("#8f8f8f")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._layout: shorts.Layout | None = None
+        self._settings: shorts.Settings | None = None
+        self._source_label = ""
+        self.setMinimumWidth(self.MIN_WIDTH)
+        self.setMinimumHeight(self.MIN_HEIGHT)
+        self.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.MinimumExpanding
+        )
+
+    # -- what to draw ----------------------------------------------------
+
+    def show_framing(
+        self,
+        settings: shorts.Settings,
+        width: int,
+        height: int,
+        *,
+        label: str,
+    ) -> None:
+        """Redraw for `settings` against a source `width` x `height`.
+
+        `label` says where those dimensions came from, since a source that has
+        not been picked yet is drawn against an assumed resolution and the
+        diagram would otherwise claim more than it knows.
+        """
+        self._source_label = label
+        try:
+            info = video_io.VideoInfo(
+                path=Path(), width=width, height=height, fps=0.0, duration=0.0
+            )
+            self._layout = shorts.plan(info, settings)
+            self._settings = settings
+        except (ValueError, ZeroDivisionError):
+            # Out-of-range option values are the user mid-edit, not an error
+            # worth a dialog. Keep the last good drawing until they land.
+            pass
+        self.update()
+
+    def kept_in_source(self) -> tuple[float, float, float, float]:
+        """The kept region in source pixels, as (x, y, w, h).
+
+        The foreground is scaled, then inset by the configured crop, then
+        centre-cropped to the canvas -- so the survivor is a box centred on the
+        inset region, mapped back through the scale factor. Dividing by it is
+        what puts the answer in the source's own coordinates, which is the only
+        frame of reference the top diagram can honestly be drawn in.
+        """
+        layout = self._layout
+        assert layout is not None
+        scale = layout.scale_h / layout.source_h if layout.source_h else 1.0
+        left, _right, top, _bottom = layout.crop
+        inset_w = min(layout.scale_w, max(2, layout.scale_w - left - _right))
+        inset_h = min(layout.scale_h, max(2, layout.scale_h - top - _bottom))
+        centre_x = left + inset_w / 2
+        centre_y = top + inset_h / 2
+        return (
+            (centre_x - layout.visible_w / 2) / scale,
+            (centre_y - layout.visible_h / 2) / scale,
+            layout.visible_w / scale,
+            layout.visible_h / scale,
+        )
+
+    # -- drawing ---------------------------------------------------------
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.fillRect(self.rect(), self.BACKDROP)
+
+        margin = 12
+        left = margin
+        width = max(1, self.width() - 2 * margin)
+        if self._layout is None:
+            self._text(painter, left, margin, width, "Framing", self.CAPTION)
+            return
+
+        cursor = margin
+        cursor = self._draw_source(painter, left, cursor, width)
+        cursor += 12
+        self._draw_canvas(painter, left, cursor, width)
+
+    def _text(
+        self, painter: QPainter, x: int, y: int, width: int, text: str, colour: QColor
+    ) -> int:
+        """One line, returning the y below it."""
+        painter.setPen(colour)
+        metrics = painter.fontMetrics()
+        painter.drawText(
+            QRectF(x, y, width, metrics.height()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            text,
+        )
+        return y + metrics.height()
+
+    def _box(
+        self, painter: QPainter, rect: QRectF, fill: QColor, edge: QColor, width: float
+    ) -> None:
+        painter.setBrush(QBrush(fill))
+        painter.setPen(QPen(edge, width))
+        painter.drawRect(rect)
+
+    def _draw_source(self, painter: QPainter, x: int, y: int, width: int) -> int:
+        """The source frame with the kept region over it. Returns the y below."""
+        layout = self._layout
+        assert layout is not None
+
+        y = self._text(
+            painter, x, y, width,
+            f"Source · {layout.source_w}×{layout.source_h}",
+            self.CAPTION,
+        )
+        y = self._text(painter, x, y, width, self._source_label, self.DETAIL)
+        y += 6
+
+        # Capped rather than given the width outright: see SOURCE_SHARE.
+        box_w = float(width)
+        box_h = box_w * layout.source_h / layout.source_w
+        cap = self.height() * self.SOURCE_SHARE
+        if box_h > cap:
+            box_h = cap
+            box_w = box_h * layout.source_w / layout.source_h
+        frame = QRectF(x + (width - box_w) / 2, y, box_w, box_h)
+        self._box(painter, frame, self.FRAME_FILL, self.FRAME_EDGE, 1.0)
+
+        scale = box_w / layout.source_w
+        kx, ky, kw, kh = self.kept_in_source()
+        kept = QRectF(
+            frame.left() + kx * scale,
+            frame.top() + ky * scale,
+            kw * scale,
+            kh * scale,
+        ).intersected(frame)
+        self._box(painter, kept, self.KEPT_FILL, self.KEPT_EDGE, 2.0)
+
+        y = int(frame.bottom()) + 6
+        return self._text(
+            painter, x, y, width,
+            f"keeps {layout.width_kept:.0%} of the width"
+            f" · {int(kw)}×{int(kh)} px",
+            self.DETAIL,
+        )
+
+    def _draw_canvas(self, painter: QPainter, x: int, y: int, width: int) -> None:
+        """The output canvas: bars, foreground, and where the offset puts it."""
+        layout = self._layout
+        assert layout is not None
+
+        y = self._text(
+            painter, x, y, width,
+            f"Short · {layout.canvas_w}×{layout.canvas_h}",
+            self.CAPTION,
+        )
+        y += 6
+
+        # Two lines of detail are reserved below, so the canvas never grows
+        # into them and the whole panel stays inside its height.
+        detail = painter.fontMetrics().height() * 2 + 8
+        available = max(40.0, self.height() - y - detail - 12)
+        box_h = available
+        box_w = box_h * layout.canvas_w / layout.canvas_h
+        if box_w > width:
+            box_w = float(width)
+            box_h = box_w * layout.canvas_h / layout.canvas_w
+        canvas = QRectF(x + (width - box_w) / 2, y, box_w, box_h)
+
+        scale = box_h / layout.canvas_h
+        # The bars are the blurred copy of the frame darkened toward black, so
+        # they are drawn as what they are: a grey whose lightness follows the
+        # opacity setting rather than a flat placeholder.
+        shade = int(20 + 70 * max(0.0, min(1.0, self._settings.opacity)))
+        self._box(painter, canvas, QColor(shade, shade, shade), self.FRAME_EDGE, 1.0)
+
+        front = QRectF(
+            canvas.left() + (layout.canvas_w - layout.visible_w) / 2 * scale,
+            canvas.top()
+            + ((layout.canvas_h - layout.visible_h) / 2 + layout.offset_y) * scale,
+            layout.visible_w * scale,
+            layout.visible_h * scale,
+        )
+        # Clipped, not just drawn: an offset bigger than the bar pushes the
+        # foreground off the canvas, and the diagram has to lose the same
+        # sliver the encode does rather than drawing outside the frame.
+        painter.save()
+        painter.setClipRect(canvas)
+        self._box(painter, front, self.KEPT_FILL, self.KEPT_EDGE, 2.0)
+        painter.restore()
+
+        y = int(canvas.bottom()) + 6
+        bars = (
+            f"{layout.bar_h}px bars, blur-filled"
+            if layout.bar_h > 0
+            else "no bars at this zoom — the fill never shows"
+        )
+        y = self._text(painter, x, y, width, bars, self.DETAIL)
+        self._text(
+            painter, x, y, width,
+            f"background {self._settings.opacity:.0%}"
+            f" · blur σ{self._settings.blur_sigma:g}",
+            self.DETAIL,
+        )
+
+
 class JobTab(QWidget):
     """A video input, an output folder, options, a button, a log.
 
@@ -221,7 +608,6 @@ class JobTab(QWidget):
     key = "job"  # QSettings namespace for this page's remembered values
     button_text = "Run"
     input_label = "Video"
-    description = ""
 
     def __init__(self) -> None:
         super().__init__()
@@ -241,16 +627,14 @@ class JobTab(QWidget):
     # -- construction ----------------------------------------------------
 
     def _build_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        # The page is two columns: the controls, and whatever the job wants to
+        # show alongside them. The side panel is built last, once every control
+        # it watches exists.
+        page = QHBoxLayout(self)
+        page.setSpacing(12)
+        layout = QVBoxLayout()
         layout.setSpacing(10)
-
-        # White rather than a muted grey: the window follows the system dark
-        # scheme, where palette(mid) sits a few shades off the background and
-        # the description all but disappears.
-        blurb = QLabel(self.description)
-        blurb.setWordWrap(True)
-        blurb.setStyleSheet("color: white;")
-        layout.addWidget(blurb)
+        page.addLayout(layout, stretch=1)
 
         box = QGroupBox()
         form = QVBoxLayout(box)
@@ -310,8 +694,7 @@ class JobTab(QWidget):
         # the slack of a taller window opens up here, between the options and
         # the buttons, rather than under the log. Put below the log instead it
         # leaves the log stranded mid-window when the window grows, and pushes
-        # it off the bottom when the window narrows and the description above
-        # wraps onto more lines.
+        # it off the bottom when the window narrows.
         layout.addStretch(1)
         layout.addLayout(buttons)
 
@@ -343,6 +726,14 @@ class JobTab(QWidget):
         self.log.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.log.setFixedHeight(self._log_height())
         layout.addWidget(self.log)
+
+        panel = self.build_side_panel()
+        if panel is not None:
+            page.addWidget(panel)
+
+    def build_side_panel(self) -> QWidget | None:
+        """The right-hand column, or None for a job with nothing to show."""
+        return None
 
     def _log_height(self) -> int:
         """Exactly LOG_LINES of text, plus the chrome around them.
@@ -398,6 +789,26 @@ class JobTab(QWidget):
         self.resets.append(button)
         return button
 
+    def _captioned(
+        self,
+        grid: QGridLayout,
+        row: int,
+        column: int,
+        label: str,
+        control: QWidget,
+        *,
+        tip: str = "",
+    ) -> QWidget:
+        """Drop a control into a pair's [label][control] cells."""
+        caption = QLabel(label)
+        if tip:
+            caption.setToolTip(tip)
+            control.setToolTip(tip)
+        base = column * PAIR_STRIDE
+        grid.addWidget(caption, row, base)
+        grid.addWidget(control, row, base + 1)
+        return control
+
     def _spin(
         self,
         grid: QGridLayout,
@@ -430,10 +841,7 @@ class JobTab(QWidget):
             # spelled on a spin box that has to hold a number regardless.
             spin.setSpecialValueText(special)
         spin.setMinimumWidth(96)
-        caption = QLabel(label)
-        if tip:
-            caption.setToolTip(tip)
-            spin.setToolTip(tip)
+        self._captioned(grid, row, column, label, spin, tip=tip)
 
         # Read back rather than reuse `value`: the spin box has already rounded
         # it to its own decimals, and that rounded number is what comparisons
@@ -441,13 +849,10 @@ class JobTab(QWidget):
         default = spin.value()
         described = special if special and default == spin.minimum() else f"{default:g}"
 
-        base = column * PAIR_STRIDE
-        grid.addWidget(caption, row, base)
-        grid.addWidget(spin, row, base + 1)
         grid.addWidget(
             self._reset(default, spin.value, spin.setValue, spin.valueChanged, described),
             row,
-            base + 2,
+            column * PAIR_STRIDE + 2,
         )
         return spin
 
@@ -700,49 +1105,154 @@ class ShortTab(JobTab):
     secondary_text = "Preview frame"
     input_label = "Highlights"
     options_title = "Framing"
-    description = (
-        "Reframes landscape highlights as 1080x1920 shorts: the clip centred "
-        "at a fraction of the frame height, with the bars above and below "
-        "filled by a blurred, darkened copy of the same frame. Every video in "
-        "the chosen folder is reframed, each keeping its own name."
-    )
+
+    # What the diagram is drawn against until a folder is picked and the real
+    # thing can be read off the first video in it. 1080p rather than the 21:9
+    # the author records at: it is the aspect most sources actually are, and
+    # the panel says in as many words that it is an assumption.
+    ASSUMED_SOURCE = (1920, 1080)
 
     def add_options(self, grid: QGridLayout) -> None:
         defaults = self._defaults()
 
-        self.zoom_spin = self._spin(
-            grid, 0, 0, "Zoom",
-            low=0.05, high=2.0, value=defaults.zoom, step=0.05, decimals=2,
-            tip="1.0 fills the portrait frame height and crops the sides; "
-                "0.5 leaves a blurred bar of equal height above and below.",
+        zoom_tip = (
+            "1.0 fills the portrait frame height and crops the sides; "
+            "0.5 leaves a blurred bar of equal height above and below."
         )
+        self.zoom_bar = ZoomBar(
+            low=0.05, high=2.0, value=defaults.zoom, step=0.05
+        )
+        self._captioned(grid, 0, 0, "Zoom", self.zoom_bar, tip=zoom_tip)
+        grid.addWidget(
+            self._reset(
+                self.zoom_bar.value(),
+                self.zoom_bar.value,
+                self.zoom_bar.setValue,
+                self.zoom_bar.valueChanged,
+                f"{self.zoom_bar.value():g}",
+            ),
+            0,
+            2,
+        )
+
+        # Directly under the bar, because it is the same number: the bar is the
+        # one worth dragging, the pixels are the one worth typing when the size
+        # has to match something. No reset of its own -- the bar's covers both.
+        self.size_fields = ScaledSize(defaults.canvas_h, self.ASSUMED_SOURCE)
+        self._captioned(
+            grid, 1, 0, "Size", self.size_fields,
+            tip="What the clip is scaled to at this zoom, before cropping. "
+                "Type either number and the other follows the source's aspect.",
+        )
+
         self.offset_spin = self._spin(
             grid, 0, 1, "Vertical offset",
             low=-1920, high=1920, value=defaults.offset_y, step=10, suffix=" px",
             tip="Shift the clip off centre, positive down.",
         )
         self.opacity_spin = self._spin(
-            grid, 1, 0, "Background",
+            grid, 2, 0, "Background",
             low=0.0, high=1.0, value=defaults.opacity, step=0.05, decimals=2,
             tip="Opacity of the blurred fill behind the bars, 0 (black) to 1.",
         )
         self.blur_spin = self._spin(
-            grid, 1, 1, "Blur",
+            grid, 2, 1, "Blur",
             low=0.0, high=64.0, value=defaults.blur_sigma, step=1.0, decimals=1,
             tip="Blur sigma before the upscale that multiplies it -- 8 here is "
                 "about 64 at full resolution.",
         )
         self.start_spin = self._spin(
-            grid, 2, 0, "Trim from",
+            grid, 3, 0, "Trim from",
             low=0.0, high=86400.0, value=0.0, step=1.0, decimals=1, suffix=" s",
             special="start",
             tip="Skip this many seconds of the clip.",
         )
         self.duration_spin = self._spin(
-            grid, 2, 1, "Length",
+            grid, 3, 1, "Length",
             low=0.0, high=86400.0, value=0.0, step=1.0, decimals=1, suffix=" s",
             special="whole clip",
             tip="How many seconds to keep. Leave at 'whole clip' for all of it.",
+        )
+
+    def build_side_panel(self) -> QWidget | None:
+        """The framing diagram, wired to every control that moves it."""
+        self.preview = FramingPreview()
+        for control in (
+            self.zoom_bar, self.offset_spin, self.opacity_spin, self.blur_spin
+        ):
+            control.valueChanged.connect(self._refresh_preview)
+        self.zoom_bar.valueChanged.connect(self._show_scaled_size)
+        self.size_fields.zoomEdited.connect(self._zoom_typed)
+
+        # Reading the source costs a file open, so it waits for typing to stop
+        # rather than firing on every keystroke of a pasted path.
+        self._probe_timer = QTimer(self)
+        self._probe_timer.setSingleShot(True)
+        self._probe_timer.setInterval(400)
+        self._probe_timer.timeout.connect(self._probe_source)
+        self.source_edit.textChanged.connect(self._probe_timer.start)
+
+        self._source_size = self.ASSUMED_SOURCE
+        self._source_note = "assumed — pick a folder to read the real size"
+        self._probed: str | None = None
+        self._show_scaled_size()
+        self._refresh_preview()
+        return self.preview
+
+    def _show_scaled_size(self, *_ignored) -> None:
+        self.size_fields.show_zoom(self.zoom_bar.value())
+
+    def _zoom_typed(self, zoom: float) -> None:
+        """A pixel size was typed. Move the bar, then say what it settled on.
+
+        The bar rounds to its own step, and when that rounding lands back on
+        the value it already held it emits nothing -- leaving the boxes showing
+        the number that was typed rather than the one in force. Hence the
+        unconditional refresh rather than leaving it to valueChanged.
+        """
+        self.zoom_bar.setValue(zoom)
+        self._show_scaled_size()
+
+    def _probe_source(self) -> None:
+        """Read the first video's resolution, so the diagram is about it.
+
+        Anything unreadable -- an empty field, a path part-way through being
+        typed, a folder with no videos in it -- falls back to the assumption
+        rather than emptying the panel. The diagram is about the framing, and
+        the framing is worth showing before there is a video to apply it to.
+        """
+        raw = self.source_edit.text().strip()
+        if raw == self._probed:
+            return
+        self._probed = raw
+        size, note = self.ASSUMED_SOURCE, "assumed — pick a folder to read the real size"
+        if raw:
+            try:
+                first = pipeline.sources(Path(raw))[0]
+                info = video_io.probe(first)
+                if info.width > 0 and info.height > 0:
+                    size, note = (info.width, info.height), f"from {first.name}"
+            except Exception:  # noqa: BLE001 -- a half-typed path is not an error
+                pass
+        self._source_size, self._source_note = size, note
+        # The width is the source's aspect applied to the height, so a new
+        # source changes what the same zoom comes to.
+        self.size_fields.set_source(size)
+        self._show_scaled_size()
+        self._refresh_preview()
+
+    def _refresh_preview(self, *_ignored) -> None:
+        width, height = self._source_size
+        self.preview.show_framing(
+            self._settings_now(), width, height, label=self._source_note
+        )
+
+    def _settings_now(self) -> shorts.Settings:
+        return shorts.Settings.load(
+            zoom=self.zoom_bar.value(),
+            offset_y=self.offset_spin.value(),
+            opacity=self.opacity_spin.value(),
+            blur_sigma=self.blur_spin.value(),
         )
 
     def _defaults(self) -> shorts.Settings:
@@ -757,7 +1267,7 @@ class ShortTab(JobTab):
 
     def remembered(self) -> dict[str, object]:
         return {
-            "zoom": self.zoom_spin.value(),
+            "zoom": self.zoom_bar.value(),
             "offset_y": self.offset_spin.value(),
             "opacity": self.opacity_spin.value(),
             "blur": self.blur_spin.value(),
@@ -766,21 +1276,18 @@ class ShortTab(JobTab):
     def restore(self) -> None:
         super().restore()
         for name, widget, cast in (
-            ("zoom", self.zoom_spin, float),
+            ("zoom", self.zoom_bar, float),
             ("offset_y", self.offset_spin, int),
             ("opacity", self.opacity_spin, float),
             ("blur", self.blur_spin, float),
         ):
             self.restore_option(name, widget, cast)
         self._refresh_resets()
+        self._show_scaled_size()
+        self._refresh_preview()
 
     def _current(self) -> tuple[shorts.Settings, float | None, float | None]:
-        settings = shorts.Settings.load(
-            zoom=self.zoom_spin.value(),
-            offset_y=self.offset_spin.value(),
-            opacity=self.opacity_spin.value(),
-            blur_sigma=self.blur_spin.value(),
-        )
+        settings = self._settings_now()
         # Both spin boxes spell "unset" as their minimum, 0.
         start = self.start_spin.value() or None
         duration = self.duration_spin.value() or None
@@ -831,7 +1338,10 @@ class MainWindow(QMainWindow):
         # Width is a starting point the user can change; the height is not,
         # it follows what the page needs (see showEvent).
         self._fitted = False
-        self.resize(700, self.sizeHint().height())
+        # Wider than the controls alone need: the framing panel takes the
+        # right-hand third, and the portrait diagram in it is only worth
+        # drawing if it has the width to be read at a glance.
+        self.resize(980, self.sizeHint().height())
 
     # -- the strip along the bottom ---------------------------------------
 
@@ -915,11 +1425,10 @@ class MainWindow(QMainWindow):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        # A narrower window wraps the description onto more lines, so what the
-        # page needs depends on the width. Without re-flooring here, dragging
-        # the window narrower keeps a height that no longer fits and the log
-        # gets squeezed off the bottom. Only the floor moves -- the height is
-        # the user's once the window is up.
+        # What the page needs depends on its width. Without re-flooring here,
+        # dragging the window narrower keeps a height that no longer fits and
+        # the log gets squeezed off the bottom. Only the floor moves -- the
+        # height is the user's once the window is up.
         if event.size().width() != event.oldSize().width():
             self._floor()
 

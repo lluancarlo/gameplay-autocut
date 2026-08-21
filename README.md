@@ -84,11 +84,31 @@ Everything lands in the one output folder, which defaults to
 `%USERPROFILE%\Videos\VVideo`.
 
 Zoom, vertical offset, background opacity, blur and a trim are all on the page.
-**Preview frame** composites a single frame to a PNG and shows it, which is the
-cheap way to settle the zoom before rendering anything.
+
+**Zoom** is a drag bar with the factor beside it, and **Size** underneath is the
+same setting in pixels — the width and height the clip is scaled to before it is
+cropped to the canvas. Drag when you are eyeing it against the diagram; type a
+pixel size when it has to match something. Either box settles the other from the
+source's aspect, and both move the bar, so a size the bar cannot reach comes
+back corrected rather than sticking. Because the width is the source's aspect
+applied to the height, the numbers change when a folder with a different
+resolution is picked.
+
+The panel down the right side draws the framing to scale and redraws as you
+change it. On top, the source frame with the region that survives the crop
+picked out — so *how much am I throwing away* is answered before a frame is
+decoded. Below, the 1080×1920 result: the foreground where the offset puts it,
+and the blur-filled bars above and below, shaded by the background opacity. The
+source dimensions come from the first video in the chosen folder; until there is
+one, the diagram says which resolution it is assuming.
+
+That is geometry, not a render. **Preview frame** is the other half: it
+composites a single real frame to a PNG and shows it, which is the cheap way to
+settle the zoom against actual footage before rendering anything.
 
 Every input with a default has a ↺ button that appears when you change it and
-puts it back. Folders and framing settings are remembered between launches.
+puts it back. Size has none of its own — it is zoom said differently, so zoom's
+resets both. Folders and framing settings are remembered between launches.
 
 Work runs on a background thread, so the window stays responsive, and **Cancel**
 stops a run at any point — killing the ffmpeg it has in flight, not just

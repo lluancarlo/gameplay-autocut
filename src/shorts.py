@@ -137,6 +137,33 @@ class Layout:
         return "\n".join(lines)
 
 
+def scaled_size(
+    source_w: int, source_h: int, canvas_h: int, zoom: float
+) -> tuple[int, int]:
+    """The size the source is scaled to at `zoom`, before any cropping.
+
+    Zoom 1.0 == fill the canvas height, which is what Resolve's baseline scale
+    does for a landscape clip on a portrait timeline.
+    """
+    scale_h = _even(canvas_h * zoom)
+    return _even(source_w * scale_h / source_h), scale_h
+
+
+def zoom_for_height(scale_h: float, canvas_h: int) -> float:
+    """The zoom that scales the source to `scale_h` pixels tall."""
+    return scale_h / canvas_h
+
+
+def zoom_for_width(
+    scale_w: float, source_w: int, source_h: int, canvas_h: int
+) -> float:
+    """The zoom that scales the source to `scale_w` pixels wide.
+
+    The aspect is the source's, so a width is just a height said differently.
+    """
+    return scale_w * source_h / source_w / canvas_h
+
+
 def plan(info: video_io.VideoInfo, settings: Settings) -> Layout:
     """Resolve the composite's geometry for one source video."""
     if info.width <= 0 or info.height <= 0:
@@ -144,10 +171,9 @@ def plan(info: video_io.VideoInfo, settings: Settings) -> Layout:
     if settings.zoom <= 0:
         raise ValueError(f"Zoom must be positive, got {settings.zoom}")
 
-    # Zoom 1.0 == fill the canvas height, which is what Resolve's baseline
-    # scale does for a landscape clip on a portrait timeline.
-    scale_h = _even(settings.canvas_h * settings.zoom)
-    scale_w = _even(info.width * scale_h / info.height)
+    scale_w, scale_h = scaled_size(
+        info.width, info.height, settings.canvas_h, settings.zoom
+    )
 
     left, right, top, bottom = settings.crop
     inset_w = max(2, scale_w - left - right)
