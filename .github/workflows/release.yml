@@ -1,0 +1,103 @@
+# Builds VVideo.exe on Windows and publishes it as a release zip.
+#
+#   git tag v1.0.0 && git push origin v1.0.0    -> full release
+#   Actions -> Release -> Run workflow          -> build only, artifact, no release
+#
+# The release carries three files: the zip, a SHA-256 checksum file, and a
+# build provenance attestation. Together they answer the two questions an
+# unsigned .exe always gets -- "is this the file the repo built?" and "has it
+# been tampered with since?" -- without a code signing certificate. Antivirus
+# false positives on PyInstaller output are common; a verifiable hash plus a
+# GitHub-attested build is what a user can check before running it.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    permissions:
+      contents: write # create the release and upload assets
+      id-token: write # sign the provenance attestation
+      attestations: write # record it against this repo
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build VVideo.exe
+        run: pyinstaller VVideo.spec --noconfirm --clean
+
+      # The zip holds exactly one file, VVideo.exe at its root -- nothing to
+      # unpack into a folder, nothing to find.
+      - name: Package
+        shell: pwsh
+        run: |
+          if (-not (Test-Path dist/VVideo.exe)) { throw "dist/VVideo.exe was not built" }
+          New-Item -ItemType Directory -Force release | Out-Null
+          Compress-Archive -Path dist/VVideo.exe -DestinationPath release/VVideo.zip -CompressionLevel Optimal
+
+      # Both hashes: the zip is what gets downloaded, the .exe is what actually
+      # runs, and a user who has already extracted it can only check the second.
+      - name: Checksums
+        shell: pwsh
+        run: |
+          $lines = foreach ($f in @('release/VVideo.zip', 'dist/VVideo.exe')) {
+            $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            "$h  $(Split-Path $f -Leaf)"
+          }
+          $lines | Write-Host
+          Set-Content -Path release/SHA256SUMS.txt -Value $lines -Encoding ascii
+
+      # Signed statement, verifiable with `gh attestation verify`, that this
+      # exact zip came out of this workflow at this commit.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: release/VVideo.zip
+
+      # Kept for workflow_dispatch runs, which publish nothing.
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VVideo-${{ github.sha }}
+          path: |
+            release/VVideo.zip
+            release/SHA256SUMS.txt
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The body lives in .github/release-notes.md -- markdown full of
+          # backticks and pipes does not survive being inlined here.
+          $notes = Get-Content .github/release-notes.md -Raw
+          $notes = $notes.Replace('__VERSION__', '${{ github.ref_name }}')
+          $notes = $notes.Replace('__COMMIT__', '${{ github.sha }}')
+          $notes = $notes.Replace('__REPO__', '${{ github.repository }}')
+          $notes = $notes.Replace('__ZIP_HASH__', (Get-FileHash release/VVideo.zip -Algorithm SHA256).Hash.ToLower())
+          $notes = $notes.Replace('__EXE_HASH__', (Get-FileHash dist/VVideo.exe -Algorithm SHA256).Hash.ToLower())
+          Set-Content -Path release/notes.md -Value $notes -Encoding utf8
+          gh release create "${{ github.ref_name }}" `
+            release/VVideo.zip release/SHA256SUMS.txt `
+            --title "VVideo ${{ github.ref_name }}" `
+            --notes-file release/notes.md
