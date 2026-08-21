@@ -31,3 +31,7 @@ out/
 
 # Local tooling. Machine-specific paths, not project configuration.
 .claude/settings.local.json
+
+# Portable settings file the window writes beside the .exe, and only when a
+# setting differs from its default. Machine-specific, never the project's.
+VVideo.ini

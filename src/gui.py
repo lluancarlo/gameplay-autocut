@@ -11,13 +11,16 @@ for anyone running the .exe -- there is no console behind it to fall back to.
 
 from __future__ import annotations
 
+import sys
 import traceback
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import (
-    QObject, QRectF, QSettings, QThread, QTimer, QUrl, Qt, Signal,
+    QObject, QRectF, QSettings, QStandardPaths, QThread, QTimer, QUrl, Qt,
+    Signal,
 )
 from PySide6.QtGui import (
     QBrush, QColor, QDesktopServices, QIcon, QPainter, QPen, QPixmap,
@@ -57,10 +60,119 @@ APP_NAME = "VVideo"
 # This is the *window* icon: the .exe's own icon is set in VVideo.spec.
 ICON_PATH = config.ROOT / "vvideo-icon.png"
 
-# Everything lands here unless the user picks somewhere else. Videos/ is a
-# real folder on both platforms (Windows ships it; the XDG spec names it), and
-# creating the subfolder is left until something is actually written.
-DEFAULT_OUTPUT = Path.home() / "Videos" / APP_NAME
+
+@lru_cache(maxsize=1)
+def videos_dir() -> Path:
+    """The user's Videos folder.
+
+    Not %USERPROFILE%\\Videos, which is only where it usually is: Windows keeps
+    the real location in the FOLDERID_Videos known folder, and that moves when
+    someone relocates it -- to a second drive, or to OneDrive, which takes it
+    over on a lot of machines. Qt's MoviesLocation reads that same known folder
+    (and the XDG videos dir elsewhere), so it follows. Home/Videos is only the
+    fallback for when Qt has nothing to report.
+    """
+    location = QStandardPaths.writableLocation(
+        QStandardPaths.StandardLocation.MoviesLocation
+    )
+    return Path(location) if location else Path.home() / "Videos"
+
+
+def default_source() -> Path:
+    """Where the window looks for clips until told otherwise."""
+    return videos_dir()
+
+
+def default_output() -> Path:
+    """Where shorts land unless the user picks somewhere else.
+
+    A subfolder rather than Videos/ itself, and deliberately: a run reads every
+    video in the source folder, so pointing the output at the folder it just
+    read would feed the next run its own shorts. Nothing creates it until
+    something is actually written there.
+    """
+    return videos_dir() / APP_NAME
+
+
+def _drop_legacy_registry_key() -> None:
+    """Remove HKCU\\Software\\VVideo once nothing is left in it.
+
+    QSettings empties the values but leaves the keys themselves standing, and
+    an empty key is still a key -- exactly the trace this build is trying not
+    to leave. Deepest first: a key with subkeys under it will not delete.
+    """
+    if sys.platform != "win32":
+        return
+    import winreg
+
+    for path in (rf"Software\{APP_NAME}\{APP_NAME}", rf"Software\{APP_NAME}"):
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
+        except OSError:
+            pass  # already gone, or not empty -- either way, nothing to do
+
+
+def adopt_legacy_settings() -> None:
+    """Move an older build's settings out of the registry and delete them.
+
+    Builds before this one used QSettings' Windows default, which is a registry
+    key under HKCU\\Software. Shipping the ini alone would leave that key
+    sitting on every machine that ever ran one of them, so the first launch of
+    this build carries the values across and takes the key with it. On a
+    machine that never ran an older build this finds nothing and does nothing.
+    """
+    legacy = QSettings(APP_NAME, APP_NAME)
+    keys = legacy.allKeys()
+    if keys:
+        target = QSettings(str(settings_file()), QSettings.Format.IniFormat)
+        # Only if the ini has nothing to say yet -- a file next to the .exe is
+        # this build's own state and outranks whatever the registry remembers.
+        if not target.allKeys():
+            for key in keys:
+                # Only groups a tab still reads. Older builds had pages this
+                # one does not, and copying their leftovers across would keep
+                # the ini alive forever holding values nothing ever looks at.
+                if key.startswith(f"{ShortTab.key}/"):
+                    target.setValue(key, legacy.value(key))
+            target.sync()
+        legacy.clear()
+        legacy.sync()
+    _drop_legacy_registry_key()
+
+
+def _same(value: object, default: object) -> bool:
+    """Is this control still on its default?
+
+    Floats go through a slider's integer steps and a spin box's decimals on the
+    way out, so a value nobody touched can come back a hair off the number it
+    started as. Comparing exactly would write a settings file for a difference
+    of 1e-16.
+    """
+    if isinstance(value, float) and isinstance(default, (int, float)):
+        return abs(value - float(default)) < 1e-9
+    return value == default
+
+
+def settings_file() -> Path:
+    """Where preferences live: VVideo.ini beside the executable.
+
+    QSettings would otherwise default to HKCU\\Software\\VVideo on Windows --
+    a registry key left behind on a machine that only ever ran a portable .exe.
+    An ini file next to the .exe keeps the whole app in one place: delete it
+    and nothing of VVideo remains. Written only when a value actually differs
+    from its default, and removed again when none do, so the common case leaves
+    no file at all. See JobTab.save.
+
+    sys.executable, not config.ROOT: in the frozen build ROOT is the temporary
+    unpack directory, which is gone the moment the process ends.
+    """
+    base = (
+        Path(sys.executable).resolve().parent
+        if getattr(sys, "frozen", False)
+        else config.ROOT
+    )
+    return base / f"{APP_NAME}.ini"
+
 
 # Option grids run two [label][control][reset] pairs per row, separated by an
 # empty gutter column and followed by a stretching one that takes the leftover
@@ -138,7 +250,7 @@ class ResetButton(QToolButton):
     """Puts one input back to its default, and only shows up when it is off it.
 
     The default is whatever the control was built with -- config/shorts.json
-    for the framing numbers, DEFAULT_OUTPUT for the folder, unchecked for a
+    for the framing numbers, the Videos folder for the two paths, unchecked for a
     checkbox. It is captured during construction, before `restore` puts the
     last session's values over the top, so "default" keeps meaning the shipped
     value rather than whatever happened to be used last time.
@@ -615,9 +727,14 @@ class JobTab(QWidget):
         self._worker: Worker | None = None
         self._cancel: video_io.Canceller | None = None
         self._last_folder: Path | None = None
-        # Where the file dialog opens: last used folder, home until there is one.
-        self._source_hint = str(Path.home())
-        self.settings = QSettings(APP_NAME, APP_NAME)
+        # Where the file dialog opens: last used folder, the Videos folder
+        # until there is one.
+        self._source_hint = str(default_source())
+        # An ini beside the .exe rather than QSettings' registry default --
+        # see settings_file().
+        self.settings = QSettings(
+            str(settings_file()), QSettings.Format.IniFormat
+        )
         # Every reset button on this tab, so restore() can re-check them all
         # once at the end instead of relying on each control having signalled.
         self.resets: list[ResetButton] = []
@@ -638,16 +755,19 @@ class JobTab(QWidget):
 
         box = QGroupBox()
         form = QVBoxLayout(box)
-        # The source has no default -- there is no such thing as the video you
-        # meant -- so it is the one input with nothing to reset to.
+        # Both fields start on the user's Videos folder: it is where Windows
+        # puts recordings, so it is a better guess than an empty box, and
+        # restore() replaces either one the moment there is a remembered value.
         self.source_edit = self._file_row(
-            form, self.input_label, "Choose a folder of videos...", self._browse_source
+            form, self.input_label, "Choose a folder of videos...",
+            self._browse_source, default=str(default_source()),
         )
+        self.source_edit.setText(str(default_source()))
         self.dest_edit = self._file_row(
-            form, "Save to", str(DEFAULT_OUTPUT), self._browse_dest,
-            default=str(DEFAULT_OUTPUT),
+            form, "Save to", str(default_output()), self._browse_dest,
+            default=str(default_output()),
         )
-        self.dest_edit.setText(str(DEFAULT_OUTPUT))
+        self.dest_edit.setText(str(default_output()))
         layout.addWidget(box)
 
         options = QGroupBox(self.options_title)
@@ -892,7 +1012,7 @@ class JobTab(QWidget):
             self.source_edit.setText(str(Path(chosen)))
 
     def _browse_dest(self) -> None:
-        start = self.dest_edit.text().strip() or str(DEFAULT_OUTPUT)
+        start = self.dest_edit.text().strip() or str(default_output())
         # The same dialog as the source, not the native one: two folder pickers
         # in one window that look nothing alike is worse than either.
         chosen = self._pick_folder("Select output folder", start)
@@ -901,7 +1021,7 @@ class JobTab(QWidget):
 
     def _open_output(self) -> None:
         target = self._last_folder or Path(
-            self.dest_edit.text().strip() or str(DEFAULT_OUTPUT)
+            self.dest_edit.text().strip() or str(default_output())
         )
         if not target.is_dir():
             QMessageBox.information(
@@ -916,6 +1036,14 @@ class JobTab(QWidget):
         """Option values worth carrying to the next launch. Default: none."""
         return {}
 
+    def option_defaults(self) -> dict[str, object]:
+        """What `remembered` reads back when nothing has been touched.
+
+        save() writes only the difference between the two, so a launch that
+        changed nothing leaves nothing on disk.
+        """
+        return {}
+
     def restore_option(self, name: str, spin, cast) -> None:
         """Put a remembered number back on a spin box, if it still parses."""
         stored = self.settings.value(f"{self.key}/{name}")
@@ -927,16 +1055,48 @@ class JobTab(QWidget):
             pass  # a hand-edited or stale settings file is not worth a crash
 
     def save(self) -> None:
-        self.settings.setValue(f"{self.key}/dest", self.dest_edit.text().strip())
+        """Write the settings that differ from their defaults, and only those.
+
+        Everything at its default is left out, and a session that changed
+        nothing removes the file rather than writing one full of values the
+        next launch would have picked anyway. That is what keeps a fresh
+        machine clean: run the .exe, close it, nothing is left behind.
+        """
+        values: dict[str, object] = {}
+
         source = self.source_edit.text().strip()
         if source:
             folder = Path(source)
-            self.settings.setValue(
-                f"{self.key}/source_dir",
-                str(folder if folder.is_dir() else folder.parent),
-            )
+            # A single video is a legitimate thing to have picked; what is
+            # worth remembering is the folder it sat in. Anything else is kept
+            # exactly as typed -- a folder that does not exist right now (an
+            # external drive, unplugged) is still the folder they chose, and
+            # walking up to its parent would quietly lose it.
+            if folder.is_file():
+                folder = folder.parent
+            if folder != default_source():
+                values["source_dir"] = str(folder)
+
+        dest = self.dest_edit.text().strip()
+        if dest and Path(dest) != default_output():
+            values["dest"] = dest
+
+        defaults = self.option_defaults()
         for name, value in self.remembered().items():
+            if not _same(value, defaults.get(name)):
+                values[name] = value
+
+        # Rewritten wholesale: a value put back to its default has to leave the
+        # file, not sit there as a stale override.
+        self.settings.remove(self.key)
+        for name, value in values.items():
             self.settings.setValue(f"{self.key}/{name}", value)
+        self.settings.sync()
+        if not self.settings.allKeys():
+            try:
+                settings_file().unlink(missing_ok=True)
+            except OSError:
+                pass  # a file we cannot remove is not worth failing the exit over
 
     def restore(self) -> None:
         dest = self.settings.value(f"{self.key}/dest")
@@ -944,10 +1104,11 @@ class JobTab(QWidget):
             self.dest_edit.setText(str(dest))
         folder = self.settings.value(f"{self.key}/source_dir")
         if folder:
-            # Only seeds where the folder dialog opens; the field stays empty
-            # so nothing runs against last session's folder by accident.
-            self.source_edit.setPlaceholderText(f"Last used {folder}...")
-            self._source_hint = str(folder)
+            # A remembered folder replaces the default outright -- someone who
+            # picked a folder last time is far likelier to want it again than
+            # to want Videos/ back.
+            self.source_edit.setText(str(folder))
+        self._source_hint = self.source_edit.text().strip() or str(default_source())
         self._refresh_resets()
 
     def _refresh_resets(self) -> None:
@@ -990,7 +1151,7 @@ class JobTab(QWidget):
             QMessageBox.warning(self, APP_NAME, f"No such file or folder:\n{source}")
             return
 
-        raw_dest = self.dest_edit.text().strip() or str(DEFAULT_OUTPUT)
+        raw_dest = self.dest_edit.text().strip() or str(default_output())
         dest = Path(raw_dest)
 
         # One per run, handed to the pipeline so Cancel can reach the ffmpeg
@@ -1273,6 +1434,16 @@ class ShortTab(JobTab):
             "blur": self.blur_spin.value(),
         }
 
+    def option_defaults(self) -> dict[str, object]:
+        # The same config/shorts.json values the controls were built from.
+        defaults = self._defaults()
+        return {
+            "zoom": defaults.zoom,
+            "offset_y": defaults.offset_y,
+            "opacity": defaults.opacity,
+            "blur": defaults.blur_sigma,
+        }
+
     def restore(self) -> None:
         super().restore()
         for name, widget, cast in (
@@ -1491,6 +1662,8 @@ def run() -> int:
     QApplication.setOrganizationName(APP_NAME)
     app = QApplication.instance() or QApplication([])
     app.setStyle("Fusion")
+    # Before the window, which reads its settings while it is being built.
+    adopt_legacy_settings()
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
     window = MainWindow()

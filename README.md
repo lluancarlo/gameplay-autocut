@@ -41,7 +41,8 @@ needs no Python installed.
   render landed on the GPU.
 - **Settings remembered** between launches, with a one-click reset on every
   input.
-- **One portable `.exe`** — no Python, no ffmpeg install, nothing on `PATH`.
+- **One portable `.exe`** — no Python, no ffmpeg install, nothing on `PATH`, and
+  nothing left in the registry or `AppData` when you delete it.
 
 Input formats: `.mp4`, `.mkv`, `.mov`, `.avi`, `.webm`, `.flv`, `.m4v`, `.ts`.
 Output: H.264 MP4 with AAC audio at 192 kbps.
@@ -114,8 +115,11 @@ lists — deliberately, no wrapper library.
 
 The window takes a **folder of videos** and an output folder, and reframes every
 video in the folder in turn. (A single file path typed into the field works too.)
-Everything lands in the one output folder, which defaults to
-`%USERPROFILE%\Videos\VVideo`.
+Both fields start on your **Videos folder** — whichever folder Windows currently
+calls Videos, so a relocated or OneDrive-backed one is followed rather than
+assumed to be under `%USERPROFILE%`. Everything lands in the one output folder,
+which defaults to `Videos\VVideo`: a subfolder, so a second run never picks up
+the shorts the first one wrote.
 
 Zoom, vertical offset, background opacity, blur and a trim are all on the page.
 
@@ -143,6 +147,12 @@ settle the zoom against actual footage before rendering anything.
 Every input with a default has a ↺ button that appears when you change it and
 puts it back. Size has none of its own — it is zoom said differently, so zoom's
 resets both. Folders and framing settings are remembered between launches.
+
+Nothing is written outside the folders you pick. Preferences live in a
+`VVideo.ini` beside the executable — no registry keys, nothing under `AppData` —
+and only settings you actually changed go in it: leave everything at its default
+and there is no file at all. Delete the `.exe` and its `.ini` and the machine is
+back to never having run VVideo.
 
 Work runs on a background thread, so the window stays responsive, and **Cancel**
 stops a run at any point — killing the ffmpeg it has in flight, not just
