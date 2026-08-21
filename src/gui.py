@@ -1,0 +1,989 @@
+"""VVideo's window: one page over the shorts pipeline.
+
+Pick a folder of clips, pick an output folder, set the framing, press the
+button. The work runs on a QThread; touching widgets from it would crash Qt, so
+everything it has to say comes back as signals (`message`, `progress`,
+`finished`) that Qt delivers on the UI thread.
+
+Every control the CLI exposes is here, because the window is the only front end
+for anyone running the .exe -- there is no console behind it to fall back to.
+"""
+
+from __future__ import annotations
+
+import traceback
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+from PySide6.QtCore import QObject, QSettings, QThread, QTimer, QUrl, Qt, Signal
+from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDialogButtonBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QPlainTextEdit,
+    QSpinBox,
+    QStatusBar,
+    QStyle,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+from . import config, pipeline, shorts, sysmon, video_io
+
+APP_NAME = "VVideo"
+
+# Beside the project root when running from source, and unpacked next to
+# config/ in the frozen build -- config._root() already knows which is which.
+# This is the *window* icon: the .exe's own icon is set in VVideo.spec.
+ICON_PATH = config.ROOT / "vvideo-icon.png"
+
+# Everything lands here unless the user picks somewhere else. Videos/ is a
+# real folder on both platforms (Windows ships it; the XDG spec names it), and
+# creating the subfolder is left until something is actually written.
+DEFAULT_OUTPUT = Path.home() / "Videos" / APP_NAME
+
+# Option grids run two [label][control][reset] pairs per row, separated by an
+# empty gutter column and followed by a stretching one that takes the leftover
+# width so nothing else has to.
+PAIR_STRIDE = 4
+GUTTER_COLUMN = 3
+SLACK_COLUMN = 7
+OPTION_COLUMNS = 8
+RESET_COLUMNS = (2, 6)
+
+# The reset button's column keeps this width whether or not the button is
+# showing, so a control appearing or disappearing never shifts the row.
+RESET_WIDTH = 24
+
+# How much of the log is on screen. Enough to read the last few lines without
+# the box dominating the window -- the whole run is scrollable regardless.
+LOG_LINES = 4
+
+# How often the strip along the bottom re-reads CPU, GPU and memory. Fast
+# enough to show an encode starting and stopping; the reads themselves are a
+# few kernel calls, so the cost of doing it twice a second is not measurable.
+STATUS_INTERVAL_MS = 500
+
+# Each gauge keeps this width whether it reads 0% or 100%, so the three of them
+# stay put instead of shuffling sideways every time a digit is gained or lost.
+GAUGE_WIDTH = 96
+
+
+@dataclass
+class Outcome:
+    """What a finished job hands back to the window.
+
+    `folder` is what the "Open output folder" button opens, and `preview` --
+    when the job produced a still rather than a video -- is shown right away,
+    since the whole point of a preview is looking at it.
+    """
+
+    summary: str
+    folder: Path | None = None
+    preview: Path | None = None
+
+
+class Worker(QObject):
+    """Runs one job off the UI thread and reports back by signal."""
+
+    message = Signal(str)
+    progress = Signal(int, int)
+    finished = Signal(bool, object)
+    cancelled = Signal()
+
+    def __init__(self, job: Callable[..., Outcome]) -> None:
+        super().__init__()
+        self._job = job
+
+    def run(self) -> None:
+        try:
+            outcome = self._job(self.message.emit, self.progress.emit)
+        except video_io.Cancelled:
+            # Asked for, so not an error: no traceback, no dialog.
+            self.message.emit("")
+            self.message.emit("🛑 Cancelled.")
+            self.cancelled.emit()
+            return
+        except Exception as error:  # noqa: BLE001 -- the UI is the error handler
+            # The traceback is the only diagnostic a windowed .exe can offer;
+            # there is no console for it to fall out of.
+            self.message.emit("")
+            self.message.emit(traceback.format_exc().rstrip())
+            self.finished.emit(False, str(error) or error.__class__.__name__)
+            return
+        self.finished.emit(True, outcome)
+
+
+class ResetButton(QToolButton):
+    """Puts one input back to its default, and only shows up when it is off it.
+
+    The default is whatever the control was built with -- config/shorts.json
+    for the framing numbers, DEFAULT_OUTPUT for the folder, unchecked for a
+    checkbox. It is captured during construction, before `restore` puts the
+    last session's values over the top, so "default" keeps meaning the shipped
+    value rather than whatever happened to be used last time.
+
+    It reads the default back off the control after setting it rather than
+    trusting the number passed in: a spin box rounds to its own decimals, and
+    a default it cannot represent exactly would leave the button showing
+    permanently on a value the user never touched.
+    """
+
+    def __init__(self, default, read, write, changed, describe: str) -> None:
+        super().__init__()
+        self._default = default
+        self._read = read
+        self._write = write
+
+        self.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        self.setIconSize(self.iconSize() * 0.7)
+        self.setAutoRaise(True)
+        self.setFixedWidth(RESET_WIDTH)
+        # Not a tab stop: it comes and goes, and a focus order that changes as
+        # you edit is worse than one button being mouse-only.
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setToolTip(f"Back to the default ({describe})")
+
+        self.clicked.connect(lambda: self._write(self._default))
+        changed.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self, *_ignored) -> None:
+        self.setVisible(self._read() != self._default)
+
+
+class PreviewDialog(QDialog):
+    """A rendered still, scaled to fit on screen.
+
+    Portrait 1080x1920 does not fit on most displays at full size, so it is
+    shown scaled and the real file stays on disk for a proper look.
+    """
+
+    def __init__(self, image: Path, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{APP_NAME} preview")
+        self._image = image
+
+        layout = QVBoxLayout(self)
+        canvas = QLabel()
+        canvas.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = QPixmap(str(image))
+        if pixmap.isNull():
+            canvas.setText(f"Could not display\n{image}")
+        else:
+            canvas.setPixmap(
+                pixmap.scaled(
+                    420,
+                    760,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        layout.addWidget(canvas)
+
+        caption = QLabel(str(image))
+        caption.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        caption.setStyleSheet("color: palette(mid);")
+        layout.addWidget(caption)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        open_button = buttons.addButton(
+            "Open file", QDialogButtonBox.ButtonRole.ActionRole
+        )
+        open_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._image)))
+        )
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
+class JobTab(QWidget):
+    """A video input, an output folder, options, a button, a log.
+
+    Subclasses supply `build_job`, which returns the callable the worker runs,
+    and may add their own controls in `add_options`.
+    """
+
+    key = "job"  # QSettings namespace for this page's remembered values
+    button_text = "Run"
+    input_label = "Video"
+    description = ""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._thread: QThread | None = None
+        self._worker: Worker | None = None
+        self._cancel: video_io.Canceller | None = None
+        self._last_folder: Path | None = None
+        # Where the file dialog opens: last used folder, home until there is one.
+        self._source_hint = str(Path.home())
+        self.settings = QSettings(APP_NAME, APP_NAME)
+        # Every reset button on this tab, so restore() can re-check them all
+        # once at the end instead of relying on each control having signalled.
+        self.resets: list[ResetButton] = []
+        self._build_ui()
+        self.restore()
+
+    # -- construction ----------------------------------------------------
+
+    def _build_ui(self) -> None:
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        # White rather than a muted grey: the window follows the system dark
+        # scheme, where palette(mid) sits a few shades off the background and
+        # the description all but disappears.
+        blurb = QLabel(self.description)
+        blurb.setWordWrap(True)
+        blurb.setStyleSheet("color: white;")
+        layout.addWidget(blurb)
+
+        box = QGroupBox()
+        form = QVBoxLayout(box)
+        # The source has no default -- there is no such thing as the video you
+        # meant -- so it is the one input with nothing to reset to.
+        self.source_edit = self._file_row(
+            form, self.input_label, "Choose a folder of videos...", self._browse_source
+        )
+        self.dest_edit = self._file_row(
+            form, "Save to", str(DEFAULT_OUTPUT), self._browse_dest,
+            default=str(DEFAULT_OUTPUT),
+        )
+        self.dest_edit.setText(str(DEFAULT_OUTPUT))
+        layout.addWidget(box)
+
+        options = QGroupBox(self.options_title)
+        self.options_layout = QGridLayout(options)
+        self.add_options(self.options_layout)
+        # Two label/control pairs per row, laid out as [label][control] gutter
+        # [label][control] slack. Every column but the last sizes to its
+        # contents, so each caption sits against the control it names instead
+        # of drifting away from it as the window widens; the gutter keeps the
+        # two pairs from reading as one run of four columns.
+        self.options_layout.setColumnMinimumWidth(GUTTER_COLUMN, 40)
+        self.options_layout.setColumnStretch(SLACK_COLUMN, 1)
+        for column in RESET_COLUMNS:
+            self.options_layout.setColumnMinimumWidth(column, RESET_WIDTH)
+        # A tab with no knobs should not show an empty box.
+        options.setVisible(self.options_layout.count() > 0)
+        layout.addWidget(options)
+
+        buttons = QHBoxLayout()
+        self.run_button = QPushButton(self.button_text)
+        self.run_button.setMinimumHeight(34)
+        self.run_button.clicked.connect(self.start)
+        buttons.addWidget(self.run_button, stretch=1)
+
+        self.secondary_button: QPushButton | None = None
+        if self.secondary_text:
+            self.secondary_button = QPushButton(self.secondary_text)
+            self.secondary_button.setMinimumHeight(34)
+            self.secondary_button.clicked.connect(self.start_secondary)
+            buttons.addWidget(self.secondary_button)
+
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setMinimumHeight(34)
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel)
+        buttons.addWidget(self.cancel_button)
+
+        self.open_button = QPushButton("Open output folder")
+        self.open_button.setMinimumHeight(34)
+        self.open_button.clicked.connect(self._open_output)
+        buttons.addWidget(self.open_button)
+
+        # Everything from here down is anchored to the bottom of the window:
+        # the slack of a taller window opens up here, between the options and
+        # the buttons, rather than under the log. Put below the log instead it
+        # leaves the log stranded mid-window when the window grows, and pushes
+        # it off the bottom when the window narrows and the description above
+        # wraps onto more lines.
+        layout.addStretch(1)
+        layout.addLayout(buttons)
+
+        # Sits directly on top of the log, so progress and the lines explaining
+        # it read as one block. Styled rather than left to the theme: on the
+        # dark palette the default groove is barely distinguishable from the
+        # window behind it.
+        #
+        # On screen at all times, empty when idle, rather than appearing for
+        # the duration of a job. It is what keeps the page's height constant,
+        # which is what lets the window sit exactly as tall as its content --
+        # a bar that came and went would need 24px that are no longer there.
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFixedHeight(14)
+        self.progress_bar.setStyleSheet(
+            "QProgressBar { background-color: white; border: 1px solid #3c3c3c;"
+            " border-radius: 3px; }"
+            "QProgressBar::chunk { background-color: #24a148; border-radius: 2px; }"
+        )
+        self._reset_progress()
+        layout.addWidget(self.progress_bar)
+
+        self.log = QPlainTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setPlaceholderText("Output appears here.")
+        # Long paths should scroll, not reflow into an unreadable wall.
+        self.log.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.log.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.log.setFixedHeight(self._log_height())
+        layout.addWidget(self.log)
+
+    def _log_height(self) -> int:
+        """Exactly LOG_LINES of text, plus the chrome around them.
+
+        The horizontal scrollbar is pinned on and counted in. Wrapping is off,
+        so a long output path makes it appear on its own; left to come and go
+        it would steal a line from a box this short exactly when the run starts
+        producing the paths worth reading.
+        """
+        return (
+            LOG_LINES * self.log.fontMetrics().lineSpacing()
+            + 2 * int(self.log.document().documentMargin())
+            + 2 * self.log.frameWidth()
+            + self.log.horizontalScrollBar().sizeHint().height()
+        )
+
+    def _file_row(
+        self, form: QVBoxLayout, label: str, placeholder: str, handler,
+        *, default: str | None = None,
+    ) -> QLineEdit:
+        row = QHBoxLayout()
+        caption = QLabel(label)
+        caption.setMinimumWidth(60)
+        edit = QLineEdit()
+        edit.setPlaceholderText(placeholder)
+        button = QPushButton("Browse...")
+        button.clicked.connect(handler)
+        row.addWidget(caption)
+        row.addWidget(edit, stretch=1)
+        if default is not None:
+            # Between the field and Browse. The field is the only stretching
+            # thing in the row, so it absorbs the width when the button hides
+            # and Browse stays put either way.
+            row.addWidget(
+                self._reset(
+                    default, edit.text, edit.setText, edit.textChanged, default
+                )
+            )
+        row.addWidget(button)
+        form.addLayout(row)
+        return edit
+
+    # -- options ---------------------------------------------------------
+
+    options_title = "Options"
+    secondary_text = ""
+
+    def add_options(self, grid: QGridLayout) -> None:
+        """Add this job's controls. Default: none."""
+
+    def _reset(self, default, read, write, changed, describe) -> ResetButton:
+        button = ResetButton(default, read, write, changed, str(describe))
+        self.resets.append(button)
+        return button
+
+    def _spin(
+        self,
+        grid: QGridLayout,
+        row: int,
+        column: int,
+        label: str,
+        *,
+        low: float,
+        high: float,
+        value: float,
+        step: float = 1.0,
+        decimals: int = 0,
+        suffix: str = "",
+        special: str = "",
+        tip: str = "",
+    ) -> QSpinBox | QDoubleSpinBox:
+        spin: QSpinBox | QDoubleSpinBox
+        if decimals:
+            spin = QDoubleSpinBox()
+            spin.setDecimals(decimals)
+        else:
+            spin = QSpinBox()
+        spin.setRange(low, high)
+        spin.setSingleStep(step)
+        spin.setValue(value)
+        if suffix:
+            spin.setSuffix(suffix)
+        if special:
+            # Shown instead of the number at the minimum -- how "unset" is
+            # spelled on a spin box that has to hold a number regardless.
+            spin.setSpecialValueText(special)
+        spin.setMinimumWidth(96)
+        caption = QLabel(label)
+        if tip:
+            caption.setToolTip(tip)
+            spin.setToolTip(tip)
+
+        # Read back rather than reuse `value`: the spin box has already rounded
+        # it to its own decimals, and that rounded number is what comparisons
+        # against the live value have to be made against.
+        default = spin.value()
+        described = special if special and default == spin.minimum() else f"{default:g}"
+
+        base = column * PAIR_STRIDE
+        grid.addWidget(caption, row, base)
+        grid.addWidget(spin, row, base + 1)
+        grid.addWidget(
+            self._reset(default, spin.value, spin.setValue, spin.valueChanged, described),
+            row,
+            base + 2,
+        )
+        return spin
+
+    # -- browsing --------------------------------------------------------
+
+    def _pick_folder(self, title: str, start: str) -> str:
+        """A folder picker that also lists the files in each folder.
+
+        Windows' native picker only ever shows folders, so there is no way to
+        tell from it whether the folder about to be chosen is the one holding
+        the recordings -- which is the only thing worth checking before
+        pressing OK. Qt's own dialog lists the files too, greyed out because a
+        folder is still what gets picked, but it has to be asked for by name:
+        the native dialog is the default and quietly ignores ShowDirsOnly.
+
+        The filter is set to everything rather than to the video extensions
+        pipeline.sources accepts. A filter that hid files would be back to not
+        being able to see what is in the folder, which is the whole point --
+        and an .mkv listed but not picked up is worth seeing, not hiding.
+        """
+        dialog = QFileDialog(self, title, start)
+        dialog.setFileMode(QFileDialog.FileMode.Directory)
+        dialog.setOption(QFileDialog.Option.ShowDirsOnly, False)
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setNameFilter("All files (*)")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return ""
+        chosen = dialog.selectedFiles()
+        return chosen[0] if chosen else ""
+
+    def _browse_source(self) -> None:
+        start = self.source_edit.text().strip() or self._source_hint
+        chosen = self._pick_folder(
+            f"Select {self.input_label.lower()} folder", start
+        )
+        if chosen:
+            self.source_edit.setText(str(Path(chosen)))
+
+    def _browse_dest(self) -> None:
+        start = self.dest_edit.text().strip() or str(DEFAULT_OUTPUT)
+        # The same dialog as the source, not the native one: two folder pickers
+        # in one window that look nothing alike is worse than either.
+        chosen = self._pick_folder("Select output folder", start)
+        if chosen:
+            self.dest_edit.setText(str(Path(chosen)))
+
+    def _open_output(self) -> None:
+        target = self._last_folder or Path(
+            self.dest_edit.text().strip() or str(DEFAULT_OUTPUT)
+        )
+        if not target.is_dir():
+            QMessageBox.information(
+                self, APP_NAME, f"Nothing there yet:\n{target}"
+            )
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    # -- persistence -----------------------------------------------------
+
+    def remembered(self) -> dict[str, object]:
+        """Option values worth carrying to the next launch. Default: none."""
+        return {}
+
+    def restore_option(self, name: str, spin, cast) -> None:
+        """Put a remembered number back on a spin box, if it still parses."""
+        stored = self.settings.value(f"{self.key}/{name}")
+        if stored is None:
+            return
+        try:
+            spin.setValue(cast(stored))
+        except (TypeError, ValueError):
+            pass  # a hand-edited or stale settings file is not worth a crash
+
+    def save(self) -> None:
+        self.settings.setValue(f"{self.key}/dest", self.dest_edit.text().strip())
+        source = self.source_edit.text().strip()
+        if source:
+            folder = Path(source)
+            self.settings.setValue(
+                f"{self.key}/source_dir",
+                str(folder if folder.is_dir() else folder.parent),
+            )
+        for name, value in self.remembered().items():
+            self.settings.setValue(f"{self.key}/{name}", value)
+
+    def restore(self) -> None:
+        dest = self.settings.value(f"{self.key}/dest")
+        if dest:
+            self.dest_edit.setText(str(dest))
+        folder = self.settings.value(f"{self.key}/source_dir")
+        if folder:
+            # Only seeds where the folder dialog opens; the field stays empty
+            # so nothing runs against last session's folder by accident.
+            self.source_edit.setPlaceholderText(f"Last used {folder}...")
+            self._source_hint = str(folder)
+        self._refresh_resets()
+
+    def _refresh_resets(self) -> None:
+        """Re-check every reset button. Call after restoring values in bulk.
+
+        Setting a control emits its change signal and the button follows on its
+        own, but only when the value actually changed -- so a restore that puts
+        a control back to what it already held would otherwise leave the button
+        showing whatever it was showing before.
+        """
+        for button in self.resets:
+            button.refresh()
+
+    # -- running ---------------------------------------------------------
+
+    def build_job(self, source: Path, dest: Path) -> Callable[..., Outcome]:
+        raise NotImplementedError
+
+    def build_secondary_job(self, source: Path, dest: Path) -> Callable[..., Outcome]:
+        raise NotImplementedError
+
+    def start(self) -> None:
+        self._launch(self.build_job)
+
+    def start_secondary(self) -> None:
+        self._launch(self.build_secondary_job)
+
+    def _launch(self, factory) -> None:
+        if self._thread is not None:
+            return  # already running; the buttons are disabled anyway
+
+        raw_source = self.source_edit.text().strip()
+        if not raw_source:
+            QMessageBox.warning(self, APP_NAME, "Choose a folder first.")
+            return
+        source = Path(raw_source)
+        # Browse offers folders, but a single video typed or pasted in still
+        # works -- pipeline.sources takes either.
+        if not source.exists():
+            QMessageBox.warning(self, APP_NAME, f"No such file or folder:\n{source}")
+            return
+
+        raw_dest = self.dest_edit.text().strip() or str(DEFAULT_OUTPUT)
+        dest = Path(raw_dest)
+
+        # One per run, handed to the pipeline so Cancel can reach the ffmpeg
+        # it is currently running.
+        self._cancel = video_io.Canceller()
+        try:
+            job = factory(source, dest)
+        except Exception as error:  # noqa: BLE001 -- bad option values land here
+            QMessageBox.critical(self, APP_NAME, str(error))
+            return
+
+        self.save()
+        self.log.clear()
+        self._set_busy(True)
+        # Starts empty and fills. Not the indeterminate range: both jobs report
+        # real progress, and a bar sweeping back and forth says less than one
+        # sitting at 0 for the second or two before the first report arrives.
+        self._reset_progress()
+
+        self._thread = QThread(self)
+        self._worker = Worker(job)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.message.connect(self._append)
+        self._worker.progress.connect(self._advance)
+        self._worker.finished.connect(self._done)
+        self._worker.cancelled.connect(self._stopped)
+        self._thread.start()
+
+    def cancel(self) -> None:
+        """Stop the running job, killing whatever ffmpeg it has in flight."""
+        if self._cancel is None:
+            return
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setText("Stopping...")
+        self._append("")
+        self._append("🛑 Cancelling — stopping ffmpeg…")
+        self._cancel.cancel()
+
+    def _set_busy(self, busy: bool) -> None:
+        self.run_button.setEnabled(not busy)
+        self.run_button.setText("Working..." if busy else self.button_text)
+        if self.secondary_button is not None:
+            self.secondary_button.setEnabled(not busy)
+        self.cancel_button.setEnabled(busy)
+        self.cancel_button.setText("Cancel")
+
+    def _reset_progress(self) -> None:
+        """Empty and still. Not the indeterminate range, which would animate."""
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+
+    def _append(self, line: str) -> None:
+        self.log.appendPlainText(line)
+
+    def _advance(self, done: int, total: int) -> None:
+        if total <= 0:
+            return
+        # The pipeline reports one fixed scale for a whole run, so the range is
+        # set once and the bar only ever moves forward.
+        if self.progress_bar.maximum() != total:
+            self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(done)
+
+    def _retire_thread(self) -> None:
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait()
+            self._thread.deleteLater()
+        self._thread = None
+        self._worker = None
+        self._cancel = None
+        self._set_busy(False)
+
+    def _stopped(self) -> None:
+        """The job acknowledged the cancel. Leave the bar where it stopped."""
+        self._retire_thread()
+
+    def _done(self, ok: bool, payload: object) -> None:
+        self._retire_thread()
+        self._reset_progress()
+
+        if not ok:
+            QMessageBox.critical(self, APP_NAME, str(payload))
+            return
+
+        outcome = payload if isinstance(payload, Outcome) else Outcome(str(payload))
+        self._last_folder = outcome.folder
+        if outcome.preview is not None and outcome.preview.exists():
+            PreviewDialog(outcome.preview, self).exec()
+
+    def closing(self) -> bool:
+        """True when it is safe to close the window."""
+        return self._thread is None
+
+    def stop_for_close(self) -> None:
+        """Kill the job and wait for it, so nothing outlives the window.
+
+        ffmpeg runs in its own process: without this the window disappears and
+        the encode carries on holding the GPU until it finishes on its own.
+        """
+        if self._cancel is not None:
+            self._cancel.cancel()
+        if self._thread is not None:
+            self._thread.quit()
+            self._thread.wait(5000)
+
+
+class ShortTab(JobTab):
+    key = "short"
+    button_text = "Make shorts"
+    secondary_text = "Preview frame"
+    input_label = "Highlights"
+    options_title = "Framing"
+    description = (
+        "Reframes landscape highlights as 1080x1920 shorts: the clip centred "
+        "at a fraction of the frame height, with the bars above and below "
+        "filled by a blurred, darkened copy of the same frame. Every video in "
+        "the chosen folder is reframed, each keeping its own name."
+    )
+
+    def add_options(self, grid: QGridLayout) -> None:
+        defaults = self._defaults()
+
+        self.zoom_spin = self._spin(
+            grid, 0, 0, "Zoom",
+            low=0.05, high=2.0, value=defaults.zoom, step=0.05, decimals=2,
+            tip="1.0 fills the portrait frame height and crops the sides; "
+                "0.5 leaves a blurred bar of equal height above and below.",
+        )
+        self.offset_spin = self._spin(
+            grid, 0, 1, "Vertical offset",
+            low=-1920, high=1920, value=defaults.offset_y, step=10, suffix=" px",
+            tip="Shift the clip off centre, positive down.",
+        )
+        self.opacity_spin = self._spin(
+            grid, 1, 0, "Background",
+            low=0.0, high=1.0, value=defaults.opacity, step=0.05, decimals=2,
+            tip="Opacity of the blurred fill behind the bars, 0 (black) to 1.",
+        )
+        self.blur_spin = self._spin(
+            grid, 1, 1, "Blur",
+            low=0.0, high=64.0, value=defaults.blur_sigma, step=1.0, decimals=1,
+            tip="Blur sigma before the upscale that multiplies it -- 8 here is "
+                "about 64 at full resolution.",
+        )
+        self.start_spin = self._spin(
+            grid, 2, 0, "Trim from",
+            low=0.0, high=86400.0, value=0.0, step=1.0, decimals=1, suffix=" s",
+            special="start",
+            tip="Skip this many seconds of the clip.",
+        )
+        self.duration_spin = self._spin(
+            grid, 2, 1, "Length",
+            low=0.0, high=86400.0, value=0.0, step=1.0, decimals=1, suffix=" s",
+            special="whole clip",
+            tip="How many seconds to keep. Leave at 'whole clip' for all of it.",
+        )
+
+    def _defaults(self) -> shorts.Settings:
+        """config/shorts.json, or something sane if it cannot be read."""
+        try:
+            return shorts.Settings.load()
+        except Exception:  # noqa: BLE001 -- a missing config must not kill the tab
+            return shorts.Settings(
+                canvas_w=1080, canvas_h=1920, zoom=0.5, offset_y=0,
+                opacity=0.75, blur_sigma=8.0, blur_downscale=8, crop=(0, 0, 0, 0),
+            )
+
+    def remembered(self) -> dict[str, object]:
+        return {
+            "zoom": self.zoom_spin.value(),
+            "offset_y": self.offset_spin.value(),
+            "opacity": self.opacity_spin.value(),
+            "blur": self.blur_spin.value(),
+        }
+
+    def restore(self) -> None:
+        super().restore()
+        for name, widget, cast in (
+            ("zoom", self.zoom_spin, float),
+            ("offset_y", self.offset_spin, int),
+            ("opacity", self.opacity_spin, float),
+            ("blur", self.blur_spin, float),
+        ):
+            self.restore_option(name, widget, cast)
+        self._refresh_resets()
+
+    def _current(self) -> tuple[shorts.Settings, float | None, float | None]:
+        settings = shorts.Settings.load(
+            zoom=self.zoom_spin.value(),
+            offset_y=self.offset_spin.value(),
+            opacity=self.opacity_spin.value(),
+            blur_sigma=self.blur_spin.value(),
+        )
+        # Both spin boxes spell "unset" as their minimum, 0.
+        start = self.start_spin.value() or None
+        duration = self.duration_spin.value() or None
+        return settings, start, duration
+
+    def build_job(self, source: Path, dest: Path):
+        settings, start, duration = self._current()
+        cancel = self._cancel
+
+        def job(log, progress) -> Outcome:
+            result = pipeline.make_shorts_batch(
+                source, dest, settings=settings, start=start,
+                duration=duration, log=log, progress=progress, cancel=cancel,
+            )
+            return Outcome(f"{result.summary()} written to {dest}", folder=dest)
+
+        return job
+
+    def build_secondary_job(self, source: Path, dest: Path):
+        settings, start, duration = self._current()
+        cancel = self._cancel
+
+        def job(log, progress) -> Outcome:
+            # One frame, to check the framing before paying for the renders --
+            # so it previews the first video rather than all of them.
+            first = pipeline.sources(source)[0]
+            still = pipeline.preview_short(
+                first, dest, settings=settings, start=start,
+                duration=duration, log=log, cancel=cancel,
+            )
+            return Outcome(
+                f"preview written to {still}", folder=dest, preview=still
+            )
+
+        return job
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle(APP_NAME)
+
+        self.short_tab = ShortTab()
+        self.setCentralWidget(self.short_tab)
+
+        self._build_status_bar()
+
+        # Width is a starting point the user can change; the height is not,
+        # it follows what the page needs (see showEvent).
+        self._fitted = False
+        self.resize(700, self.sizeHint().height())
+
+    # -- the strip along the bottom ---------------------------------------
+
+    def _build_status_bar(self) -> None:
+        """CPU, GPU and memory, under the log.
+
+        It belongs to the window rather than to the page: one timer and one set
+        of counters for the whole app, sitting below the page -- which is below
+        the log either way.
+        """
+        self.monitor = sysmon.Monitor()
+
+        bar = QStatusBar()
+        # No grip: the window is resizable from any edge anyway, and it would
+        # sit in the corner competing with the numbers.
+        bar.setSizeGripEnabled(False)
+        self.setStatusBar(bar)
+
+        self.gauges: dict[str, QLabel] = {}
+        for key, caption in (("cpu", "CPU"), ("gpu", "GPU"), ("memory", "Memory")):
+            label = QLabel(f"{caption} --")
+            label.setMinimumWidth(GAUGE_WIDTH)
+            self.gauges[key] = label
+            bar.addWidget(label)
+
+        gpu = self.monitor.gpu_name
+        self.gauges["gpu"].setToolTip(gpu or "No NVIDIA GPU found")
+
+        self._ticker = QTimer(self)
+        self._ticker.setInterval(STATUS_INTERVAL_MS)
+        self._ticker.timeout.connect(self._refresh_status)
+        self._ticker.start()
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        reading = self.monitor.read()
+        gpu = self.monitor.gpu_name
+
+        self._set_gauge("cpu", "CPU", reading.cpu, "")
+        self._set_gauge(
+            "gpu",
+            "GPU",
+            reading.gpu,
+            # The card's name is the useful half of this: it is what says
+            # whether the encode is landing on the GPU it was meant to.
+            "\n".join(
+                part
+                for part in (gpu, sysmon.gigabytes(reading.vram_used, reading.vram_total))
+                if part
+            )
+            or "No NVIDIA GPU found",
+        )
+        self._set_gauge(
+            "memory",
+            "Memory",
+            reading.memory,
+            sysmon.gigabytes(reading.memory_used, reading.memory_total),
+        )
+
+    def _set_gauge(self, key: str, caption: str, value: float | None, tip: str) -> None:
+        """One gauge. A dash rather than a zero when the counter is unreadable.
+
+        No GPU, or a platform without the Win32 counters, has to look like the
+        absence of a number -- "GPU 0%" is a reading, and a wrong one.
+        """
+        label = self.gauges[key]
+        label.setText(f"{caption} --" if value is None else f"{caption} {value:.0f}%")
+        if tip:
+            label.setToolTip(tip)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not self._fitted:
+            # The one time the height is set outright: the window opens exactly
+            # as tall as its content. It has to wait for real geometry -- before
+            # the window is up the page has its default width, and wraps its
+            # description to a different number of lines than it will once
+            # shown. After this the height belongs to the user.
+            self._fitted = True
+            self.resize(self.width(), self._floor())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # A narrower window wraps the description onto more lines, so what the
+        # page needs depends on the width. Without re-flooring here, dragging
+        # the window narrower keeps a height that no longer fits and the log
+        # gets squeezed off the bottom. Only the floor moves -- the height is
+        # the user's once the window is up.
+        if event.size().width() != event.oldSize().width():
+            self._floor()
+
+    def _floor(self) -> int:
+        """Set the window's minimum height to what the page needs, and return it.
+
+        The minimum has to be set explicitly, for the same reason the height
+        does: the page's own hint does not account for the status bar and the
+        window chrome around it.
+        """
+        page = self.short_tab
+        needed = (
+            page.heightForWidth(page.width())
+            if page.hasHeightForWidth()
+            else page.sizeHint().height()
+        )
+        height = needed + (self.height() - page.height())
+        self.setMinimumHeight(height)
+        return height
+
+    def closeEvent(self, event) -> None:
+        if self.short_tab.closing():
+            self.short_tab.save()
+            self._stop_monitoring()
+            event.accept()
+            return
+        # Killing a running ffmpeg or a half-written mp4 on a stray click is
+        # worth one confirmation.
+        answer = QMessageBox.question(
+            self,
+            APP_NAME,
+            "A job is still running. Stop it and quit?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            event.ignore()
+            return
+        # Quitting has to take the work with it. ffmpeg is a separate process
+        # and does not care that its parent has gone -- left alone it runs the
+        # encode to the end, on the GPU, with no window to show for it.
+        self.short_tab.stop_for_close()
+        self.short_tab.save()
+        self._stop_monitoring()
+        event.accept()
+
+    def _stop_monitoring(self) -> None:
+        """Let go of NVML before the window does, on the way out.
+
+        Stopping the timer first matters: a tick that lands between the
+        shutdown and the process actually ending would be reading through a
+        handle that is no longer good for anything.
+        """
+        self._ticker.stop()
+        self.monitor.close()
+
+
+def run() -> int:
+    QApplication.setApplicationName(APP_NAME)
+    QApplication.setOrganizationName(APP_NAME)
+    app = QApplication.instance() or QApplication([])
+    app.setStyle("Fusion")
+    if ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(ICON_PATH)))
+    window = MainWindow()
+    window.show()
+    return app.exec()

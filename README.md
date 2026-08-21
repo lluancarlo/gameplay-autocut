@@ -1,0 +1,200 @@
+<div align="center">
+  <img src="vvideo-logo.png" alt="VVideo" width="220">
+
+  **Turns landscape clips into uploads.**
+</div>
+
+---
+
+VVideo reframes a landscape highlight as a 1080×1920 Short — the footage centred
+at a fraction of the frame height, the bars above and below filled with a
+blurred, darkened copy of the same frame — without opening an editor.
+
+![Make shorts](docs/make-shorts.png)
+
+---
+
+## What it does
+
+Point it at a folder of clips. Every video in it is reframed and written to the
+output folder, each keeping its own name.
+
+```
++----------------+  <- blurred cover of the frame, at 75% opacity
+|################|
++----------------+
+|     source     |  <- the clip at 1920 * zoom tall, centre-cropped
++----------------+
+|################|
++----------------+
+```
+
+This replaces doing it by hand in DaVinci Resolve — clip on a portrait timeline
+at zoom 0.5 plus a Blanking Fill at 75% background opacity — in one ffmpeg pass,
+at roughly 7× realtime on NVENC.
+
+---
+
+## Getting started
+
+### Run the app
+
+```
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python VVideo.py
+```
+
+ffmpeg ships inside the `imageio-ffmpeg` wheel — nothing else to install, and
+nothing needs to be on `PATH`.
+
+### Build the .exe
+
+```
+pyinstaller VVideo.spec      # -> dist\VVideo.exe
+```
+
+One self-contained ~130 MB executable, no Python needed on the target machine.
+
+---
+
+## Built with
+
+Python 3.12. Everything below installs from `requirements.txt`, which holds the
+version floors; the versions in brackets are what it is developed against.
+
+| Library | What it does here |
+|---|---|
+| **[OpenCV](https://opencv.org/)** (`opencv-python`, 5.0) | Probes each source for resolution, fps and duration — imageio-ffmpeg ships ffmpeg only, with no ffprobe. |
+| **[PySide6](https://doc.qt.io/qtforpython/)** (Qt 6.11) | The window. Widgets, the worker thread jobs run on, and the signals they report back through. |
+| **[imageio-ffmpeg](https://github.com/imageio/imageio-ffmpeg)** (0.6) | Ships **ffmpeg 7.1** inside the wheel. Nothing needs installing or adding to `PATH`, and the binary rides along into the `.exe`. |
+| **[PyInstaller](https://pyinstaller.org/)** (6.21) | Build only: freezes everything above into `dist\VVideo.exe`. |
+
+Every ffmpeg invocation is a plain `subprocess` call with hand-written argument
+lists — deliberately, no wrapper library.
+
+---
+
+## Using the window
+
+The window takes a **folder of videos** and an output folder, and reframes every
+video in the folder in turn. (A single file path typed into the field works too.)
+Everything lands in the one output folder, which defaults to
+`%USERPROFILE%\Videos\VVideo`.
+
+Zoom, vertical offset, background opacity, blur and a trim are all on the page.
+**Preview frame** composites a single frame to a PNG and shows it, which is the
+cheap way to settle the zoom before rendering anything.
+
+Every input with a default has a ↺ button that appears when you change it and
+puts it back. Folders and framing settings are remembered between launches.
+
+Work runs on a background thread, so the window stays responsive, and **Cancel**
+stops a run at any point — killing the ffmpeg it has in flight, not just
+abandoning it. Closing the window mid-job asks first, then does the same.
+
+Progress is one bar across the whole run: with three videos, the first finishing
+puts you at 33%.
+
+Along the bottom, **CPU**, **GPU** and **Memory** refresh twice a second — the
+quick way to tell whether the render is landing on NVENC or falling back to
+x264. Hovering gives the card's name and the used/total figures. The GPU reading
+needs an NVIDIA driver; without one it reads `--`, as CPU and memory do off
+Windows.
+
+---
+
+## Command line
+
+The same job, one file at a time, with a few extras the window has no room for.
+
+```
+python make-short.py clip.mp4
+python make-short.py clip.mp4 --preview             # one PNG frame, encode nothing
+python make-short.py clip.mp4 --preview 12.5        # ...at a specific second
+python make-short.py clip.mp4 --start 12 --duration 45
+python make-short.py clip.mp4 --zoom 0.6 --offset-y -80
+python make-short.py clip.mp4 --out D:\shorts
+```
+
+Without `--out`, `make-short.py` writes to `export/shorts/`.
+
+Renders are NVENC when the GPU takes it, libx264 otherwise; audio to AAC.
+
+---
+
+## How it works
+
+### The filtergraph
+
+One `filter_complex`, one decode. `split` feeds two branches: the background is
+the frame scaled to *cover* 1080×1920, centre-cropped, blurred and darkened; the
+foreground is the frame scaled to `1920 * zoom` tall and cropped to the canvas.
+`overlay` puts one on the other.
+
+The blur runs on a 1/8-size copy and is scaled back up, so the effective
+full-resolution sigma is 8× what the config says. A real sigma-64 gaussian over a
+1080×1920 plane is the slowest filter in the graph by a wide margin and looks no
+different — past a certain radius the upscale interpolation *is* the blur.
+
+Background opacity is a straight multiply toward black (`colorlevels`), which is
+what compositing at that alpha over the timeline's black backdrop comes to.
+
+### Zoom means fill
+
+Zoom means what Resolve's Inspector means by it, with **1.0 being *fill*** — the
+clip scaled until it covers the portrait frame, sides cropped off — not fit. The
+scale factor is `1920 / source_height`, and two things follow:
+
+- The foreground is always `1920 * zoom` tall and the bars are always
+  `1920 * (1 - zoom) / 2` each, **whatever the source aspect**. Blanking is
+  therefore always top and bottom, never left and right. At zoom ≥ 1 there are
+  none and the blurred background never shows.
+- How much of the source's **width** survives the crop does depend on the aspect:
+  a 3440×1440 (21:9) clip keeps its central ~47% at zoom 0.5, a 1920×1080 one
+  ~63%. The app prints the figure it computed.
+
+---
+
+## Configuration
+
+Everything tunable lives in `config/shorts.json`: canvas size, zoom, vertical
+offset, background opacity, blur sigma and downscale, Blanking Fill crop insets.
+Geometry is computed from the source at runtime, so nothing here is tied to a
+resolution; every CLI flag just overrides the matching key.
+
+---
+
+## Project layout
+
+```
+VVideo.py            entry point for the window, and what PyInstaller freezes
+VVideo.spec          the .exe build
+make-short.py        CLI: landscape clip -> 1080x1920 short
+src/
+  pipeline.py        the seam every front end calls through
+  gui.py             the window
+  shorts.py          portrait geometry and the filtergraph
+  video_io.py        probing, and every ffmpeg invocation
+  sysmon.py          CPU/GPU/memory counters behind the status bar
+  config.py          config/ loading, also from inside the frozen bundle
+config/              shorts.json
+```
+
+`src/pipeline.py` is the seam: it takes `log` and `progress` callbacks rather
+than printing, so the window and the CLI are both thin front ends over the same
+code.
+
+---
+
+## Notes
+
+- **Windows-first.** Paths, the `.exe` build and the NVENC encoder choice all
+  assume it, though nothing in the pipeline is deliberately platform-locked.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

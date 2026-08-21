@@ -1,0 +1,33 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# PyInstaller: build/ is intermediate, dist/ holds an exe that is rebuilt from
+# VVideo.spec in one command. Neither belongs in the history.
+build/
+dist/
+*.manifest
+
+# Output. Everything the job writes, plus the window's default target.
+export/
+out/
+
+# Sample recordings and clips. These live at the project root while being
+# worked on and run to gigabytes -- the pipeline is verified against them
+# locally, never in the repo.
+*.mkv
+*.mp4
+*.mov
+*.avi
+*.webm
+*.flv
+*.m4v
+*.ts
+!docs/*.png
+
+# Preview stills the shorts job writes beside its output.
+*.preview.png
+
+# Local tooling. Machine-specific paths, not project configuration.
+.claude/settings.local.json

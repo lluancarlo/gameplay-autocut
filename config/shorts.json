@@ -1,0 +1,34 @@
+{
+  "_note": "Landscape highlight -> 1080x1920 Shorts frame (see src/shorts.py). Reproduces the DaVinci Resolve setup this replaced: the clip dropped on a portrait timeline scaled to FILL, zoomed to 0.5, with a Blanking Fill effect at 75% background opacity and no crop. Everything here is a knob on that composite; the geometry is computed, not stored, so any source resolution works.",
+
+  "canvas": {
+    "_note": "Output frame. 1080x1920 is the YouTube Shorts / Reels / TikTok native portrait size; both dimensions must stay even for yuv420p.",
+    "width": 1080,
+    "height": 1920
+  },
+
+  "zoom": 0.5,
+  "_zoom_note": "Matches Resolve's Inspector zoom, with 1.0 meaning 'fill the portrait frame' (scale = canvas_height / source_height, sides cropped away). So the foreground is always canvas_height * zoom tall, leaving canvas_height * (1 - zoom) / 2 of blanking above and below it -- 480px each at 0.5. How much WIDTH survives depends on the source: a 3440x1440 (21:9) clip shows its central ~47% at this zoom, a 1920x1080 source ~63%. At zoom >= 1 there is no blanking left and the background never shows.",
+
+  "offset_y": 0,
+  "_offset_y_note": "Pixels to shift the foreground off dead centre, positive down. Resolve's Position Y, sign-flipped to match screen coordinates. Useful when the action sits low in frame; 0 is what the manual timeline did.",
+
+  "background": {
+    "_note": "The Blanking Fill: the same frame scaled to COVER the whole 1080x1920 canvas (centre-cropped, so nothing letterboxes), blurred, then darkened. Only the top/bottom bars are ever visible -- the foreground covers the rest.",
+
+    "opacity": 0.75,
+    "_opacity_note": "Blanking Fill's 'Background opacity'. Applied as a straight multiply toward black (colorlevels romax), which is what compositing at this alpha over the timeline's black backdrop comes to.",
+
+    "blur_sigma": 8.0,
+    "blur_downscale": 8,
+    "_blur_note": "The blur runs on a 1/blur_downscale-size copy and is scaled back up, so the effective full-resolution sigma is blur_sigma * blur_downscale (8 * 8 = 64). A real sigma-64 gaussian over a 1080x1920 plane is the slowest filter in the graph by a wide margin and looks the same -- past a certain radius the upscale interpolation IS the blur. Raise blur_downscale for speed, blur_sigma for a softer fill."
+  },
+
+  "crop": {
+    "_note": "Blanking Fill's Crop Left/Right/Top/Bottom, in pixels, inset from the foreground's edges before it is placed. All 0 in the manual setup; here for parity with the effect's controls.",
+    "left": 0,
+    "right": 0,
+    "top": 0,
+    "bottom": 0
+  }
+}
