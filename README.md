@@ -1,16 +1,50 @@
 <div align="center">
-  <img src="vvideo-logo.png" alt="VVideo" width="220">
+  <img src="vvideo-logo.png" alt="VVideo — landscape to vertical video converter" width="220">
 
   **Turns landscape clips into uploads.**
 </div>
 
+# VVideo — landscape to vertical video converter for YouTube Shorts, TikTok and Reels
+
+VVideo is a free, open-source **9:16 vertical video converter for Windows**. It
+reframes a landscape highlight as a **1080×1920 Short** — the footage centred at
+a fraction of the frame height, the bars above and below filled with a blurred,
+darkened copy of the same frame — without opening a video editor.
+
+Batch-convert a whole folder of gameplay clips, stream highlights or screen
+recordings to portrait in one ffmpeg pass, GPU-accelerated with **NVENC**. Comes
+as a **Qt desktop app** and a **command-line tool**, plus a portable `.exe` that
+needs no Python installed.
+
+![VVideo desktop app — batch converting landscape clips to 1080x1920 vertical shorts](docs/make-shorts.png)
+
 ---
 
-VVideo reframes a landscape highlight as a 1080×1920 Short — the footage centred
-at a fraction of the frame height, the bars above and below filled with a
-blurred, darkened copy of the same frame — without opening an editor.
+## Features
 
-![Make shorts](docs/make-shorts.png)
+- **Landscape → portrait (9:16)** at 1080×1920, the native size for YouTube
+  Shorts, TikTok, Instagram Reels and Facebook Reels.
+- **Blurred background fill** — no black bars. The same frame, scaled to cover,
+  blurred and darkened behind the clip.
+- **Batch processing.** Point it at a folder; every video in it is converted,
+  each keeping its own name.
+- **GPU-accelerated encoding** with NVIDIA NVENC (`h264_nvenc`), falling back to
+  libx264 on machines without one.
+- **Live framing diagram** that draws the crop to scale as you change it, and a
+  **single-frame PNG preview** rendered from the real footage.
+- **Zoom in pixels or as a factor** — drag the bar, or type the exact scaled
+  size when it has to match something.
+- **Trim** a start point and a length without a separate pass.
+- **Cancel mid-run**, killing the ffmpeg in flight rather than leaving it
+  encoding in the background.
+- **CPU, GPU and memory readouts** along the bottom, so you can see whether the
+  render landed on the GPU.
+- **Settings remembered** between launches, with a one-click reset on every
+  input.
+- **One portable `.exe`** — no Python, no ffmpeg install, nothing on `PATH`.
+
+Input formats: `.mp4`, `.mkv`, `.mov`, `.avi`, `.webm`, `.flv`, `.m4v`, `.ts`.
+Output: H.264 MP4 with AAC audio at 192 kbps.
 
 ---
 
@@ -113,6 +147,8 @@ resets both. Folders and framing settings are remembered between launches.
 Work runs on a background thread, so the window stays responsive, and **Cancel**
 stops a run at any point — killing the ffmpeg it has in flight, not just
 abandoning it. Closing the window mid-job asks first, then does the same.
+**Open output folder** puts the results up in Explorer without going looking for
+the path.
 
 Progress is one bar across the whole run: with three videos, the first finishing
 puts you at 33%.
@@ -140,7 +176,10 @@ python make-short.py clip.mp4 --out D:\shorts
 
 Without `--out`, `make-short.py` writes to `export/shorts/`.
 
-Renders are NVENC when the GPU takes it, libx264 otherwise; audio to AAC.
+Renders are NVENC when the GPU takes it (`h264_nvenc`, preset p5, VBR at
+`-cq 19`), libx264 at `-crf 18` otherwise; audio to AAC at 192 kbps. Which
+encoder is used is settled by actually trying `h264_nvenc` on the machine —
+ffmpeg carries it whether or not there is a card to run it on.
 
 ---
 
@@ -175,6 +214,10 @@ scale factor is `1920 / source_height`, and two things follow:
   a 3440×1440 (21:9) clip keeps its central ~47% at zoom 0.5, a 1920×1080 one
   ~63%. The app prints the figure it computed.
 
+`src/shorts.py` exposes that arithmetic on its own — `scaled_size()`,
+`zoom_for_height()` and `zoom_for_width()` — which is what lets the window show
+the scaled size in pixels, and accept one typed in, without planning a render.
+
 ---
 
 ## Configuration
@@ -208,6 +251,43 @@ code.
 
 ---
 
+## FAQ
+
+### How do I convert a landscape video to vertical without black bars?
+
+Use a blurred copy of the frame as the background instead of black. That is what
+VVideo does by default: the clip sits at zoom 0.5 and the bars above and below
+are filled with the same frame, scaled to cover, blurred, and darkened to 75%.
+
+### Can it convert a whole folder at once?
+
+Yes. The input field takes a folder, and every supported video inside it is
+converted in turn into the one output folder, each keeping its own filename. A
+single file path works too.
+
+### Does it need ffmpeg installed?
+
+No. ffmpeg 7.1 rides along inside the `imageio-ffmpeg` wheel, and into the
+`.exe`. Nothing has to be installed or added to `PATH`.
+
+### Does it use the GPU?
+
+On an NVIDIA card, yes — `h264_nvenc`, at roughly 7× realtime. Without one it
+falls back to libx264 on the CPU. The status bar shows which one is working.
+
+### What source resolutions does it accept?
+
+Any. The geometry is computed from each source at runtime, so 1920×1080,
+2560×1440, 3440×1440 ultrawide and 4K all work; only how much of the *width*
+survives the crop changes.
+
+### Does it run on macOS or Linux?
+
+Nothing in the pipeline is deliberately platform-locked, but paths, the `.exe`
+build and the NVENC choice all assume Windows, and that is where it is tested.
+
+---
+
 ## Notes
 
 - **Windows-first.** Paths, the `.exe` build and the NVENC encoder choice all
@@ -218,3 +298,11 @@ code.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+<sub>Keywords: landscape to vertical video converter, 16:9 to 9:16, YouTube
+Shorts maker, TikTok video converter, Instagram Reels converter, batch video
+converter, blurred background video, 1080x1920 portrait video, ffmpeg NVENC GPU
+encoding, Python PySide6 Qt desktop app, Windows video tool, DaVinci Resolve
+Blanking Fill alternative, open source.</sub>
