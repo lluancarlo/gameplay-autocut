@@ -5,7 +5,7 @@ encoder; the text side runs here, once, and its output is versioned:
 
     python tools/build_prompt_bank.py
 
-Downloads (once, into VVideo-data/dev-hf, not shipped): the ONNX text encoder
+Downloads (once, into GameplayAutoCut-data/dev-hf, not shipped): the ONNX text encoder
 (1.1 GB) and the tokenizer, both pinned to the same revision as the image
 encoder in src/moments/vision.py. `logit_scale` / `logit_bias` are SigLIP 2's
 learned sigmoid parameters, read from google/siglip2-base-patch16-224 at the
@@ -51,7 +51,7 @@ def fetch(name: str) -> Path:
     from huggingface_hub import hf_hub_download
 
     path = Path(hf_hub_download(vision.MODEL["repo"], name, revision=vision.MODEL["revision"],
-                                cache_dir=str(ROOT / "VVideo-data" / "dev-hf")))
+                                cache_dir=str(ROOT / "GameplayAutoCut-data" / "dev-hf")))
     if sha256(path) != TEXT_FILES[name]:
         raise SystemExit(f"{name}: SHA-256 does not match the pinned file")
     return path

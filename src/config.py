@@ -22,11 +22,32 @@ def _root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _data_root() -> Path:
-    """VVideo-data/ beside the .exe (or the project), so deleting the folder removes everything."""
+# The file-system name: the .exe, its settings file, its data folder, the release zip.
+FILE_NAME = "GameplayAutoCut"
+LEGACY_NAME = "VVideo"   # the project's name before Gameplay AutoCut
+
+
+def _home() -> Path:
+    """Beside the .exe when frozen, the project folder when running from source."""
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent / "VVideo-data"
-    return Path(__file__).resolve().parent.parent / "VVideo-data"
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+def _data_root() -> Path:
+    """GameplayAutoCut-data/ beside the .exe (or the project); delete it and everything is gone.
+
+    A folder left by a build from before the rename (VVideo-data/, models and
+    caches -- several GB) is renamed rather than downloaded again.
+    """
+    home = _home()
+    folder, legacy = home / f"{FILE_NAME}-data", home / f"{LEGACY_NAME}-data"
+    if not folder.exists() and legacy.is_dir():
+        try:
+            legacy.rename(folder)
+        except OSError:
+            return legacy  # in use or not ours to move: keep using it as it is
+    return folder
 
 
 ROOT = _root()

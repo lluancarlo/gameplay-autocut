@@ -65,6 +65,49 @@
         "a person jumping into water",
         "a person swimming in a river"
       ]
+    },
+    "crash": {
+      "kind": "event",
+      "prompts": [
+        "a car flipping over after a crash",
+        "a car crash on the road",
+        "an overturned car lying on its roof"
+      ]
+    },
+    "fire": {
+      "kind": "event",
+      "prompts": [
+        "a car on fire",
+        "a burning vehicle with flames and smoke"
+      ]
+    },
+    "helicopter": {
+      "kind": "event",
+      "prompts": [
+        "a police helicopter in the sky",
+        "a helicopter flying low over a city"
+      ]
+    },
+    "arrest": {
+      "kind": "event",
+      "prompts": [
+        "police officers arresting a person",
+        "a person with hands up surrounded by police officers"
+      ]
+    },
+    "motorcycle": {
+      "kind": "event",
+      "prompts": [
+        "a motorcycle jumping in the air",
+        "a motorcycle doing a wheelie"
+      ]
+    },
+    "collapse": {
+      "kind": "event",
+      "prompts": [
+        "a building collapsing in a video game",
+        "a wall exploding into debris"
+      ]
     }
   }
 }

@@ -4,17 +4,18 @@ import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 from .. import config, video_io
 from ..config import DATA_DIR
 from ..pipeline import Span
-from . import audio, concepts, labels, motion, signals, sounds, speech, vision, visual
+from . import audio, concepts, judge, labels, motion, ocr, signals, sounds, speech, vision, visual, voice
 from .labels import UNLABELLED, Evidence
 from .speech import Word
 
-REASONS = {"loudness": "loud", "speech": "fast speech", "novelty": "sudden change on screen"}
+REASONS = {"loudness": "loud", "speech": "fast speech", "novelty": "sudden change on screen", "text": "text on screen"}
 # Sound groups whose curve is "how far above this recording's usual level", like `action`.
 RELATIVE_GROUPS = ("vehicle", "siren", "crash")
 
@@ -33,6 +34,8 @@ class Moment:
     evidence: list[Evidence] = field(default_factory=list)
     explanation: str = ""
     motion: dict | None = None      # camera / local optical-flow summary, for the strongest moments only
+    detector_score: int = 0         # the score before the AI review
+    ai: dict | None = None          # the AI review: score 0-10, title, description, event
 
     @property
     def length(self) -> float:
@@ -49,10 +52,13 @@ class Analysis:
     cache: Path
     signals: dict[str, list[float]] = field(default_factory=dict)
     vision: dict | None = None   # summary of the visual pass (frames, fps, provider, seconds), None if skipped
+    voice: dict | None = None    # whose voice was heard: voice.Voice.summary()
+    review: dict | None = None   # the AI review's summary: judge.review()
 
     def to_json(self) -> dict:
         return {"path": str(self.path), "duration": self.duration, "language": self.language,
-                "moments": [asdict(m) for m in self.moments], "curve": self.curve, "vision": self.vision}
+                "moments": [asdict(m) for m in self.moments], "curve": self.curve, "vision": self.vision,
+                "voice": self.voice, "review": self.review}
 
 
 def clock(seconds: float) -> str:
@@ -85,7 +91,7 @@ def _sounds(samples, cache: Path, log, span: Span, cancel) -> dict:
 
 
 def _speech(samples, cache: Path, log, span: Span, cancel) -> tuple[str, list[Word]]:
-    file = cache / "words.json"
+    file = cache / "words-v2.json"   # v2: every word carries its passage's language
     if file.is_file():
         data = json.loads(file.read_text(encoding="utf-8"))
         return data["language"], [Word(**w) for w in data["words"]]
@@ -96,10 +102,14 @@ def _speech(samples, cache: Path, log, span: Span, cancel) -> tuple[str, list[Wo
     return language, words
 
 
-def _label(moment: Moment, groups, curves, hits, phrases, cfg, vis, motion_summary: dict | None = None) -> None:
+def _label(moment: Moment, ctx, motion_summary: dict | None = None) -> None:
+    cfg = ctx.cfg
     rules = cfg["labels"]["rules"]
-    moment.evidence = labels.collect(moment.start, moment.end, groups, curves, hits, phrases, cfg["labels"]["present"],
-                                     vis, motion_summary, cfg.get("visual", {}).get("motion"))
+    if motion_summary is None:
+        motion_summary = moment.motion
+    moment.evidence = labels.collect(moment.start, moment.end, ctx.groups, ctx.curves, ctx.hits, ctx.phrases,
+                                     cfg["labels"]["present"], ctx.vis, motion_summary,
+                                     cfg.get("visual", {}).get("motion"), ctx.text_events)
     moment.label, moment.label2, moment.label_score, moment.level = labels.classify(moment.evidence, rules)
     supporting = tuple(rules.get(moment.label, {}).get("signals", {}))
     moment.explanation = labels.explain(moment.label, moment.label2, moment.evidence, supporting)
@@ -261,10 +271,9 @@ def _dedupe(moments: list[Moment], per_second: np.ndarray, cfg: dict) -> list[Mo
     return kept
 
 
-def _motion(path: Path, moments: list[Moment], groups, curves, hits, phrases, cfg, vis, log, span: Span,
-            cancel) -> None:
+def _motion(path: Path, moments: list[Moment], ctx, log, span: Span, cancel) -> None:
     """Optical flow on the strongest moments; motion becomes evidence and the labels are redone with it."""
-    mcfg = cfg["visual"]["motion"]
+    mcfg = ctx.cfg["visual"]["motion"]
     top = sorted(moments, key=lambda m: -m.score)[: int(mcfg["top"])]
     if not top:
         return
@@ -284,8 +293,57 @@ def _motion(path: Path, moments: list[Moment], groups, curves, hits, phrases, cf
             log(f"   ⚠️  Motion skipped for {clock(moment.start)}: {error}")
             continue
         moment.motion = measured
-        _label(moment, groups, curves, hits, phrases, cfg, vis, measured)
+        _label(moment, ctx, measured)
         span.at(index / len(top))
+
+
+def _screen(path: Path, duration: float, cache: Path, cfg: dict, words, curves, vis, menu_runs, n: int, log,
+            span: Span, cancel):
+    """OCR where it pays: seconds with speech (subtitles) and around the action (police notifications)."""
+    ocfg = cfg.get("ocr", {})
+    if not ocfg.get("enabled", False):
+        return None
+    try:
+        cached = ocr.load_cached(cache, ocfg)
+        if cached is not None:
+            return cached
+        want = np.zeros(n, dtype=bool)
+        for word in words:
+            t = int(word.start)
+            want[max(0, t - 1):min(n, t + 2)] = True
+        names = [k for k in ("action", "vehicle", "siren", "crash") if k in curves]
+        busy = np.max([curves[k] for k in names], axis=0) >= 0.3 if names else np.zeros(n, dtype=bool)
+        if vis is not None:
+            busy |= vis.vision >= 0.3
+        reach = int(ocfg["around_action_s"])
+        for t in np.flatnonzero(busy):
+            want[max(0, t - reach):min(n, t + reach + 1)] = True
+        found = ocr.scan(path, duration, ocfg, menu_runs, want, log=log, progress=span.counting(), cancel=cancel)
+        ocr.save(cache, found)
+        return found
+    except video_io.Cancelled:
+        raise
+    except Exception as error:  # noqa: BLE001 -- text on screen is extra evidence
+        log(f"   ⚠️  Reading text on screen skipped: {error}")
+        return None
+
+
+def _text_curve(events: list[dict], n: int, kinds: tuple[str, ...]) -> np.ndarray:
+    curve = np.zeros(n)
+    for event in events:
+        if event["kind"] in kinds:
+            t = int(event["t"])
+            curve[max(0, t - 2):min(n, t + 3)] = 1.0
+    return curve
+
+
+def _chase_start(start: float, end: float, peak: int, wanted: list[float], clip: dict) -> float:
+    """GTA 6 says when the police start looking for you: open a chase there, if it still fits."""
+    earlier = [t for t in wanted if peak - clip["max"] + clip["tail"] <= t <= peak]
+    if not earlier:
+        return start
+    begin = max(0.0, min(earlier) - clip["onset"]["pre_roll_s"])
+    return min(start, begin) if end - begin <= clip["max"] else start
 
 
 def _vision(path: Path, duration: float, cache: Path, cfg: dict, log, span: Span, cancel):
@@ -401,41 +459,53 @@ def find_moments(
     progress=_ignore,
     cancel: video_io.Canceller | None = None,
     fresh: bool = False,
+    review_skip=None,
 ) -> Analysis:
+    """Find the best moments of a recording.
+
+    Order: sound -> speech -> picture (+ menus) -> text on screen (only where
+    someone speaks or something happens) -> whose voice it is -> curves ->
+    candidates -> labels -> motion -> AI review. `review_skip` (a
+    threading.Event) ends the AI review early and keeps what it has.
+    """
     cfg = config.load("moments")
     cancel = cancel or video_io.Canceller()
     whole = Span(progress)
-    voice = track if voice_track is None else voice_track
-    cache = _cache_dir(path, track, voice)
-    if fresh and cache.is_dir():
-        for file in cache.iterdir():
-            file.unlink()
-    cache.mkdir(parents=True, exist_ok=True)
 
     log(f"🎮 {path.name}")
     samples = audio.load(path, track, cancel)
-    voice_samples = samples if voice == track else audio.load(path, voice, cancel)
-    whole.at(0.05)
-    n = int(np.ceil(len(samples) / audio.SAMPLE_RATE))
+    duration = len(samples) / audio.SAMPLE_RATE
+    n = int(np.ceil(duration))
     log(f"   ⏱️  {n // 60}m{n % 60:02d}s of audio")
+    if voice_track is None and "voice" in cfg:
+        tracks = audio.track_count(path)
+        if tracks > 1:
+            voice_track = voice.pick_track(path, tracks, duration, cfg["voice"], log, cancel)
+    voice_index = track if voice_track is None else voice_track
+    cache = _cache_dir(path, track, voice_index)
+    if fresh and cache.is_dir():
+        for file in cache.iterdir():
+            if file.is_file():
+                file.unlink()
+    cache.mkdir(parents=True, exist_ok=True)
+    voice_samples = samples if voice_index == track else audio.load(path, voice_index, cancel)
+    whole.at(0.05)
 
-    tagged = _sounds(samples, cache, log, whole.slice(0.05, 0.25), cancel)
+    tagged = _sounds(samples, cache, log, whole.slice(0.05, 0.22), cancel)
     reaction_tags = tagged
-    if voice != track:
+    if voice_index != track:
         (cache / "voice").mkdir(exist_ok=True)
-        reaction_tags = _sounds(voice_samples, cache / "voice", log, whole.slice(0.25, 0.3), cancel)
-    language, words = _speech(voice_samples, cache, log, whole.slice(0.3, 0.7), cancel)
-    seen = _vision(path, len(samples) / audio.SAMPLE_RATE, cache, cfg.get("vision", {}), log,
-                   whole.slice(0.7, 0.95), cancel)
+        reaction_tags = _sounds(voice_samples, cache / "voice", log, whole.slice(0.22, 0.27), cancel)
+    language, words = _speech(voice_samples, cache, log, whole.slice(0.27, 0.55), cancel)
+    seen = _vision(path, duration, cache, cfg.get("vision", {}), log, whole.slice(0.55, 0.72), cancel)
+    vis = _visual(seen, n, cfg, log)
 
-    members = cfg["sound_groups"]
     groups = {name: sounds.group(reaction_tags if name == "reaction" else tagged, names)
-              for name, names in members.items()}
+              for name, names in cfg["sound_groups"].items()}
     groups = {name: _fit(probs, names, n) for name, (probs, names) in groups.items()}
     action = np.maximum(groups["gunfire"][0], groups["explosion"][0])
     action_labels = [g if a >= e else x for a, e, g, x in
                      zip(groups["gunfire"][0], groups["explosion"][0], groups["gunfire"][1], groups["explosion"][1])]
-
     curves = {
         "loudness": signals.loudness(signals.loudness_db(voice_samples, n), cfg["loudness"]),
         "reaction": signals.reaction(groups["reaction"][0], cfg["reaction"]),
@@ -443,13 +513,30 @@ def find_moments(
     }
     for name in RELATIVE_GROUPS:
         curves[name] = signals.action(groups[name][0], cfg["action"])
+    menu_runs = np.zeros(n)
+    if vis is not None:
+        menu_runs = _runs(vis.menu >= cfg["visual"]["menu_run"]["level"], int(cfg["visual"]["menu_run"]["seconds"]))
+
+    screen = _screen(path, duration, cache, cfg, words, curves, vis, menu_runs, n, log, whole.slice(0.72, 0.8), cancel)
+    if voice_track is not None:
+        heard = voice.Voice("track", voice_track, player_words=list(words),
+                            detail=f"your microphone, on track {voice_track + 1}")
+    else:
+        subtitles = screen.subtitle_seconds(n) if screen is not None else np.zeros(n)
+        heard = voice.attribute(words, subtitles, cfg["voice"])
+    log(f"   🎙️  Voice: {heard.detail}")
+
     hits: list = []
     phrases = {p: w for lang in cfg["keywords"].values() for p, w in lang.items()}
-    if words:
-        curves["speech"] = signals.speech(words, n, cfg["speech"])
-        curves["keywords"], hits = signals.keywords(words, n, phrases)
+    if heard.player_words:
+        curves["speech"] = signals.speech(heard.player_words, n, cfg["speech"])
+        curves["keywords"], hits = signals.keywords(heard.player_words, n, phrases)
+    if heard.mode == "none":
+        curves["reaction"] = curves["reaction"] * cfg["voice"]["no_voice_reaction"]
+    text_events = screen.events if screen is not None else []
+    if text_events:
+        curves["text"] = _text_curve(text_events, n, ("achievement", "failure", "escaped"))
 
-    vis = _visual(seen, n, cfg, log)
     suppress = None
     if vis is not None:
         curves["vision"] = vis.vision
@@ -462,9 +549,12 @@ def find_moments(
         names = list(vis.relative)
         strongest = np.argmax(np.stack([vis.relative[k] for k in names]), axis=0)
         sound_labels["vision"] = [vis.describe.get(names[i], names[i]) for i in strongest]
-    menu_runs = _runs(vis.menu >= cfg["visual"]["menu_run"]["level"], int(cfg["visual"]["menu_run"]["seconds"]))         if vis is not None else np.zeros(n)
+    ctx = SimpleNamespace(groups=groups, curves=curves, hits=hits, phrases=phrases, cfg=cfg, vis=vis,
+                          text_events=text_events)
+
     onset_names = [k for k in cfg["clip"]["onset"]["signals"] if k in curves]
     activity = np.max([curves[k] for k in onset_names], axis=0) if onset_names else np.zeros(n)
+    wanted = [e["t"] for e in text_events if e["kind"] == "wanted"]
     candidates = []
     skipped = 0
     for peak in _peaks(curve, cfg["peaks"]["min_gap"], cfg["peaks"]["floor"]):
@@ -472,6 +562,7 @@ def find_moments(
             skipped += 1
             continue  # a menu, map or pause screen, however loud
         start, end = _onset(*_window(curve, peak, cfg["clip"]), peak, activity, cfg["clip"])
+        start = _chase_start(start, end, peak, wanted, cfg["clip"])
         if vis is not None:
             start, end = _avoid_menus(start, end, peak, menu_runs, cfg["clip"])
             if end - start < cfg["clip"]["min"] * 0.8:
@@ -480,7 +571,7 @@ def find_moments(
         start, end = _snap(start, end, words)
         score = round(100 * min(1.0, curve[peak] / cfg["peaks"]["full_score"]))
         moment = Moment(start, end, float(peak), score, _reasons(curves, shares, peak, sound_labels, hits))
-        _label(moment, groups, curves, hits, phrases, cfg, vis)
+        _label(moment, ctx)
         candidates.append(moment)
 
     moments: list[Moment] = []
@@ -490,13 +581,21 @@ def find_moments(
     if vis is not None:
         moments = _dedupe(moments, seen.per_second(n), cfg)
         for moment in moments:
-            _label(moment, groups, curves, hits, phrases, cfg, vis)
+            _label(moment, ctx)
             if _lead_in(moment, vis, cfg, len(curve)):
-                _label(moment, groups, curves, hits, phrases, cfg, vis)
-        _motion(path, moments, groups, curves, hits, phrases, cfg, vis, log, whole.slice(0.95, 0.995), cancel)
+                _label(moment, ctx)
+        _motion(path, moments, ctx, log, whole.slice(0.8, 0.84), cancel)
+    escaped = [e["t"] for e in text_events if e["kind"] == "escaped"]
     for moment in moments:
-        if moment.label == "vehicle" and labels.escape(curves, moment.end, cfg["labels"]["escape"]):
-            moment.label2 = "escape"
+        moment.detector_score = moment.score
+        if moment.label in ("vehicle", UNLABELLED) and any(moment.start <= t <= moment.end + 20 for t in escaped):
+            moment.label, moment.label2 = "vehicle", "escape"
+            moment.explanation = labels.explain(moment.label, moment.label2, moment.evidence)
+
+    review = None
+    if cfg.get("judge", {}).get("enabled", False) and moments:
+        review = judge.review(path, duration, moments, heard, screen, cfg["judge"], cache, log=log,
+                              progress=whole.slice(0.84, 0.995).counting(), cancel=cancel, skip=review_skip)
     moments.sort(key=lambda m: -m.score)
     whole.done()
     log(f"   ✨ {len(moments)} moments")
@@ -508,5 +607,7 @@ def find_moments(
         shown["menu"] = vis.menu.round(3).tolist()
         summary["menu_seconds"] = int((vis.menu >= 0.5).sum())
         summary["menu_skipped"] = skipped
-    return Analysis(path, len(samples) / audio.SAMPLE_RATE, language, moments,
-                    curve.round(4).tolist(), cache, shown, summary)
+    if screen is not None and summary is not None:
+        summary["text_events"] = len(text_events)
+    return Analysis(path, duration, language, moments, curve.round(4).tolist(), cache, shown, summary,
+                    voice=heard.summary(), review=review)

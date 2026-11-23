@@ -8,11 +8,33 @@
   "agreement_bonus": 0.15,
 
   "weights": {"loudness": 0.30, "reaction": 0.30, "action": 0.20, "speech": 0.20, "keywords": 0.25,
-              "vehicle": 0.0, "siren": 0.0, "crash": 0.0, "vision": 0.25, "novelty": 0.0},
+              "vehicle": 0.0, "siren": 0.0, "crash": 0.0, "vision": 0.25, "novelty": 0.0, "text": 0.3},
   "_weights_note": "A weight of 0 keeps a curve out of the score entirely (it still feeds the labels). vehicle, siren and crash start at 0 until the evaluation (tools/evaluate.py) shows they help.",
 
   "vision": {"enabled": true, "fps": 10, "cpu_fps": 2, "batch": 64, "decode": "auto", "nvdec_codecs": ["hevc", "av1"]},
   "_vision_note": "SigLIP 2 pass (milestone M2): frames sampled per second of video and encoded on the GPU (DirectML), or at cpu_fps on machines without one. decode 'auto' uses NVDEC for the codecs listed (measured faster there) and the CPU otherwise; 'cpu' or 'nvdec' force one. The embeddings are cached; from M3 on they feed the moments.",
+
+  "ocr": {
+    "enabled": true, "fps": 0.5, "min_score": 0.6, "around_action_s": 20,
+    "lexicon": {
+      "wanted": ["a policia esta procurando voce", "policia esta procurando voce", "wanted"],
+      "escaped": ["fugiram", "despistou a policia", "voce despistou", "perdemos ele", "lost them"],
+      "achievement": ["missao concluida", "missao cumprida", "mission passed", "mission complete", "voce venceu",
+                      "venceu a corrida", "primeiro lugar", "vitoria"],
+      "failure": ["wasted", "busted", "missao fracassada", "missao falhou", "mission failed", "voce morreu",
+                  "voce foi preso"]
+    }
+  },
+  "_ocr_note": "RapidOCR (PP-OCRv6) reads one frame every 1/fps seconds, skipping menus. Big centred text is matched whole-word against the lexicon (accents and case ignored) to find failures and achievements; subtitles mark the game's own dialogue. GTA 6 (pt-BR): 'wanted' marks where a police chase starts, 'escaped' where the police lose you. Subtitles are never matched.",
+
+  "voice": {"game_language": "en", "track_min_speech": 0.05, "min_subtitle_s": 30, "subtitle_pad_s": 1, "commentary_ratio": 0.35,
+            "commentary_min_s": 60, "no_voice_reaction": 0.5},
+  "_voice_note": "Detected, never asked. Several audio tracks: the extra track with at least track_min_speech of speech is the microphone. One track: speech in a language other than game_language (GTA 6: English) is the player's; without language information, speech under a subtitle is the game's; if at least commentary_ratio of the speech (and commentary_min_s seconds) is not subtitled, the player is talking. With no player voice, the shout/laughter signal is scaled by no_voice_reaction (it is the game's).",
+
+  "judge": {"enabled": true, "game": "GTA 6", "minutes_per_review": 2.5, "min_reviews": 10, "max_reviews": 60,
+            "frames": 8, "frame_width": 512, "look_before_s": 10, "pre_roll_s": 3, "weight": 0.6,
+            "context": 16384, "max_tokens": 400},
+  "_judge_note": "AI review (offline, llama.cpp + Qwen3-VL-4B). One review per minutes_per_review of recording (between min and max), strongest candidates first; can be stopped early. weight: share of the final score from the AI's 0-10 (x10); the rest is the detectors' score. The clip may start earlier, where the AI says the action begins, minus pre_roll_s.",
 
   "sound_groups": {
     "reaction": ["Shout", "Bellow", "Whoop", "Yell", "Battle cry", "Screaming", "Laughter", "Giggle", "Belly laugh",
@@ -31,8 +53,12 @@
     "present": 0.3,
     "rules": {
       "combat": {"signals": {"gunfire": [0.35, 2], "explosion": [0.35, 2], "see:combat": [0.5, 2], "see:explosion": [0.5, 1]}},
-      "vehicle": {"signals": {"vehicle": [0.35, 4], "siren": [0.35, 2], "see:vehicle": [0.5, 3], "see:police": [0.5, 2]}},
-      "destruction": {"signals": {"crash": [0.3, 1], "see:destruction": [0.5, 2]}},
+      "vehicle": {"signals": {"vehicle": [0.35, 4], "siren": [0.35, 2], "see:vehicle": [0.5, 3], "see:police": [0.5, 2],
+                              "see:helicopter": [0.5, 2], "see:motorcycle": [0.5, 2], "text:wanted": [0.5, 1]}},
+      "destruction": {"signals": {"crash": [0.3, 1], "see:destruction": [0.5, 2], "see:crash": [0.5, 2],
+                                  "see:fire": [0.5, 2]}},
+      "achievement": {"signals": {"text:achievement": [0.5, 1]}},
+      "failure": {"signals": {"text:failure": [0.5, 1], "see:arrest": [0.5, 2]}},
       "unusual": {"signals": {"see:water": [0.5, 2]}},
       "reaction": {"signals": {"reaction": [0.45, 1], "keyword": [0.45, 1]}}
     },

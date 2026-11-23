@@ -5,6 +5,50 @@ no application code, dependency or model has changed.
 
 ---
 
+## Revision 8 — 2026-11-23 — usable MVP for GTA 6 (offline)
+
+Scope decided with the user: GTA 6 only for now; fully offline; no camera; the player's voice may or may not be
+there and must be **detected, never asked**; skipped for now: learning from the user, Twitch chat, other games.
+
+- **Step 3 bar**: clicking/dragging the green bar seeks playback inside the clip; bounds change only with the
+  Start/End ±1s buttons.
+- **Clip starts** (user: "some cuts start already in the action"): start where the action starts (walk back
+  through gunfire/engines/sirens/crashes/picture/loudness, pauses ≤ 5 s, then 5 s pre-roll, clip up to 45 s),
+  never open or close on a menu run (≥ 3 s), drop clips squeezed between menus. Verified on the 2-hour stream:
+  the chase-and-rollover at 24:30 now opens at 24:19 instead of 24:36.
+- **GTA 6 concepts** (`config/events.json`): crash/rollover, vehicle fire, helicopter, arrest, motorcycle stunt
+  (+ collapse, kept for later). Checked on the stream: rollover 24:33, night crash with fire 47:54, helicopter 32:25
+  correct; "collapse" fires falsely in GTA (weapon wheel) — it carries no label rule.
+- **OCR** (`src/moments/ocr.py`): RapidOCR 3.10 (Apache-2.0, PP-OCRv6 bundled) on DirectML at a fixed 960×540,
+  51 ms/frame; reads accented Portuguese correctly. Reading every 2 s of a 2-hour file took 6 min, so only seconds
+  with speech or near action are read (menus never). GTA 6 pt-BR HUD gives: "A polícia está procurando você"
+  (**wanted → chase start**, used to open chase clips), "Fugiram" (police radio → **escape**), plus missions;
+  no "WASTED" in the sample stream. Installed `--no-deps` (`requirements-ocr.txt`) so it cannot replace
+  `opencv-python` or `onnxruntime-directml`.
+- **Voice, detected** (`src/moments/voice.py`): extra audio tracks are sampled with Whisper's VAD (the one with
+  speech is the mic). On one mixed track, every Whisper passage gets its own language check and passages in
+  another language are transcribed again in it; with `game_language: en` (GTA 6), non-English speech is the
+  player. Subtitles were tried first and failed (51 % "player speech" on GTA-6.mp4, which has none: subtitles are
+  missed at 0.5 fps and street chatter has none) — they remain the fallback. Results: GTA-6.mp4 "no speech outside
+  the game's language"; PORCO-DIO.mp4 (Italian) "you talk". With no player voice, speech/keyword signals are off
+  and the shout/laughter signal is halved.
+- **AI review** (`src/moments/judge.py`): llama.cpp **b12645 Vulkan** `llama-server` as a separate process
+  (MIT, 39 MB, SHA-256 pinned) + **Qwen3-VL-4B-Instruct Q4_K_M** (Apache-2.0, 2.5 GB + 0.45 GB projector, revision
+  pinned). Per candidate a dossier (8 frames from 10 s before the clip, player words, game dialogue, subtitles,
+  HUD notifications, detector explanation) → JSON (score 0–10, event, pt-BR title and description, where the
+  action starts). Final score = 0.6 × AI + 0.4 × detectors; the start moves to where the AI says the action begins
+  (−3 s) when that stays inside the window. Reviews = 1 per 2.5 min of recording (10–60), strongest first, cached;
+  **Use what we have** stops it. GTA-6.mp4: 10 reviews, bridge jump 9/10 ("Jogador e amigo saltam de ponte em
+  rio…"), dull drives 3/10.
+- **Step 4** writes `<recording>_titles.txt` with each short's AI title and description.
+- `VVideo.exe --self-test` also reads "WASTED" through OCR and starts the AI runtime; passes on the frozen build.
+- Measured on the 2-hour stream (1080p30 H.264, cold): transcription + OCR ≈ 5 min (OCR read 93 % of the
+  recording: speech and action cover most of a GTA session), vision ≈ 2 min, AI review of 34 candidates ≈ 1 min
+  (~2 s each on the RTX 4080) — about 8 min in all; re-analysis from cache 1 min 23 s. OCR found 5 "wanted"
+  notifications and 1 escape. Top 5: chase ending in a rollover (24:19), truck rollover (11:40, AI 9/10), police
+  chase (19:00), crash with the car on fire (47:38), machine-gun fight (15:37). AI titles are useful but not always
+  idiomatic Portuguese ("Caminhão Sobe Ponto de Destruição!").
+
 ## Revision 7 — 2026-11-23 — M3 implemented (visual detection)
 
 - `src/moments/visual.py`: per-second concept logits (max over the 10 frames of each second), **relative** curves

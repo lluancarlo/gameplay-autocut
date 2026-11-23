@@ -1,8 +1,10 @@
-"""VVideo -- the window. Also the entry point PyInstaller freezes into the .exe.
+"""Gameplay AutoCut -- the window. Also the entry point PyInstaller freezes into the .exe.
 
-    python VVideo.py               # run from source
-    pyinstaller VVideo.spec        # build publish/VVideo.exe
-    VVideo.exe --self-test         # check the bundle; writes VVideo-data/self-test.json
+A totally offline solution to transform gameplay into viral clips.
+
+    python GameplayAutoCut.py               # run from source
+    pyinstaller GameplayAutoCut.spec        # build publish/GameplayAutoCut.exe
+    GameplayAutoCut.exe --self-test         # check the bundle; writes GameplayAutoCut-data/self-test.json
 
 A long gameplay recording in, vertical shorts of its best moments out.
 """

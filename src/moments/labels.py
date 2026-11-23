@@ -18,7 +18,8 @@ from dataclasses import dataclass
 import numpy as np
 
 UNLABELLED = "unlabelled"
-ICONS = {"combat": "🔫", "vehicle": "🚗", "destruction": "💥", "reaction": "😮", "unusual": "🌀", UNLABELLED: "✨"}
+ICONS = {"combat": "🔫", "vehicle": "🚗", "destruction": "💥", "reaction": "😮", "unusual": "🌀",
+         "achievement": "🏆", "failure": "💀", UNLABELLED: "✨"}
 SEE = "see:"
 
 
@@ -43,7 +44,8 @@ def _span(start: float, end: float, n: int) -> tuple[int, int]:
 
 def collect(start: float, end: float, groups: dict[str, tuple[np.ndarray, list[str]]],
             curves: dict[str, np.ndarray], hits: list[tuple[float, str]], weights: dict[str, float],
-            present: float, visual=None, motion: dict | None = None, motion_cfg: dict | None = None) -> list[Evidence]:
+            present: float, visual=None, motion: dict | None = None, motion_cfg: dict | None = None,
+            text_events: list[dict] | None = None) -> list[Evidence]:
     """Everything that speaks for the moment [start, end), strongest first."""
     n = len(next(iter(curves.values()))) if curves else 0
     lo, hi = _span(start, end, n)
@@ -83,6 +85,9 @@ def collect(start: float, end: float, groups: dict[str, tuple[np.ndarray, list[s
         if value >= 0.5:
             found.append(Evidence("motion", "motion", round(value, 3), float(lo), f"{motion['local']:.1f} px/frame",
                                   max(1, int(hi - lo))))
+    for event in text_events or ():
+        if lo - 2 <= event["t"] < hi:
+            found.append(Evidence("text", "text:" + event["kind"], 1.0, float(event["t"]), event["text"], 1))
     return sorted(found, key=lambda e: -e.value)
 
 
@@ -148,6 +153,8 @@ def phrase(e: Evidence) -> str:
         return "sudden change on screen"
     if e.signal == "motion":
         return "fast movement in the scene"
+    if e.signal.startswith("text:"):
+        return f'on screen: "{e.detail}"'
     name = _short(e.detail) or e.signal
     return f"{name} for {e.seconds}s" if e.seconds > 1 else name
 

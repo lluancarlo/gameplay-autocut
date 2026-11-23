@@ -1,4 +1,4 @@
-"""The job VVideo does, with its terminal output factored out.
+"""The job Gameplay AutoCut does, with its terminal output factored out.
 
 `make-short.py` drives these from a console; the GUI drives the same functions
 from a worker thread. Everything a caller might want to show the user arrives

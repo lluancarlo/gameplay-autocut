@@ -1,6 +1,6 @@
-"""`VVideo.exe --self-test`: check that the bundle can run every model it needs.
+"""`GameplayAutoCut.exe --self-test`: check that the bundle can run every model it needs.
 
-The window has no console, so the result goes to VVideo-data/self-test.json
+The window has no console, so the result goes to GameplayAutoCut-data/self-test.json
 (and the exit code is non-zero if anything failed). Used to validate a build on
 a clean machine: no GPU, a GPU with only the driver, and the dev machine.
 Downloads nothing; a model that is not downloaded yet is reported as such.
@@ -66,8 +66,29 @@ def run() -> int:
         import ctranslate2
         return {"ctranslate2": ctranslate2.__version__, "cuda_devices": ctranslate2.get_cuda_device_count()}
 
+    def screen_text():
+        import cv2
+        from .moments import ocr, vision as v
+        image = np.full((540, 960, 3), 30, dtype=np.uint8)
+        cv2.putText(image, "WASTED", (300, 300), cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 255, 255), 6)
+        found = ocr.engine(v.gpu_available())(image)
+        return {"read": list(found.txts or [])}
+
+    def ai_review():
+        import subprocess
+        from .moments import judge
+        folder = judge._folder()
+        exe = folder / "llama" / "llama-server.exe"
+        files = {name: (folder / name).is_file() for name in judge.MODEL["files"]}
+        if not exe.is_file():
+            return {"runtime": "not downloaded yet (first AI review downloads it)", "model_files": files}
+        out = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=60,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return {"runtime": (out.stdout + out.stderr).strip().splitlines()[0], "model_files": files}
+
     for name, fn in (("ffmpeg", ffmpeg), ("onnxruntime", onnxruntime), ("vision", vision),
-                     ("prompt_bank", prompt_bank), ("sound_model", sound_model), ("whisper_runtime", whisper_runtime)):
+                     ("prompt_bank", prompt_bank), ("sound_model", sound_model), ("whisper_runtime", whisper_runtime),
+                     ("screen_text", screen_text), ("ai_review", ai_review)):
         _check(report, name, fn)
     out = config.DATA_DIR / "self-test.json"
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -4,7 +4,7 @@
     python find-moments.py session.mkv --min-score 50 --json moments.json
     python find-moments.py session.mkv --voice-track 1
 
-Every tunable lives in config/moments.json. Models download on first use into VVideo-data/.
+Every tunable lives in config/moments.json. Models download on first use into GameplayAutoCut-data/.
 """
 
 from __future__ import annotations

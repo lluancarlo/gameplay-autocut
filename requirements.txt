@@ -15,14 +15,14 @@ imageio-ffmpeg>=0.5.1
 # Probing only -- resolution, fps and duration. Pulls numpy in with it.
 opencv-python>=4.10
 
-# The window (VVideo.py / src/gui.py). Not needed for make-short.py.
+# The window (GameplayAutoCut.py / src/gui.py). Not needed for make-short.py.
 PySide6>=6.6
 
 # Moments: speech (Whisper) and sound events (CED-mini).
 faster-whisper>=1.1
 sherpa-onnx>=1.10
 
-# Build only, for `pyinstaller VVideo.spec`.
+# Build only, for `pyinstaller GameplayAutoCut.spec`.
 pyinstaller>=6.0
 
 # Tests only.

@@ -8,6 +8,7 @@ runs on a Worker thread through JobRunner, so the window never freezes.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QPointF, QSettings, QSize, Qt, QThread, QTimer, QUrl, Signal
@@ -55,6 +56,11 @@ def _primary(text: str) -> QPushButton:
     return button
 
 
+def _plain(text: str) -> str:
+    """Without emoji: on a card, Qt measures the line without the emoji font and elides what follows."""
+    return " ".join("".join(c for c in text if ord(c) < 0x2600 and c not in "️‍").split())
+
+
 def _elastic(label: QLabel) -> QLabel:
     """Long paths in a label must not set the window's minimum width."""
     label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
@@ -66,7 +72,7 @@ def _elastic(label: QLabel) -> QLabel:
 
 
 class Prefs:
-    """What the window remembers, in VVideo.ini -- only values that differ from their default.
+    """What the window remembers, in Gameplay AutoCut.ini -- only values that differ from their default.
 
     Leave everything at its default and there is no file at all; delete the file
     and the app is back to new.
@@ -267,7 +273,7 @@ class SelectStep(Step):
         inner.setContentsMargins(32, 28, 32, 28)
         inner.setSpacing(12)
         inner.addWidget(_title("Choose a gameplay recording"))
-        intro = QLabel("VVideo listens to the whole recording, finds its best moments, and turns the ones you "
+        intro = QLabel("Gameplay AutoCut listens to the whole recording, finds its best moments, and turns the ones you "
                        "pick into vertical 1080×1920 clips for Shorts, Reels and TikTok.")
         intro.setWordWrap(True)
         inner.addWidget(intro)
@@ -291,14 +297,11 @@ class SelectStep(Step):
         self.info_label.setStyleSheet("color: palette(mid);")
         inner.addWidget(self.info_label)
 
-        voice_row = QHBoxLayout()
-        self.voice_label = QLabel("Your microphone is on")
-        self.voice_combo = QComboBox()
-        self.voice_combo.setToolTip("If OBS recorded your mic on its own track, pick it: reactions are found "
-                                    "in your voice, not in the game's dialogue.")
-        voice_row.addWidget(self.voice_label)
-        voice_row.addWidget(self.voice_combo, 1)
-        inner.addLayout(voice_row)
+        voice_note = QLabel("Your voice is found automatically — on its own audio track, or mixed with the "
+                            "game (Gameplay AutoCut tells your Portuguese from the game's English).")
+        voice_note.setWordWrap(True)
+        voice_note.setStyleSheet("color: palette(mid);")
+        inner.addWidget(voice_note)
 
         go = QHBoxLayout()
         go.addStretch(1)
@@ -319,7 +322,6 @@ class SelectStep(Step):
         self.source = None
         self.file_label.setText("No video chosen yet.")
         self.info_label.setText("")
-        self._tracks(1)
         self.next_button.setEnabled(False)
 
     def _browse(self) -> None:
@@ -331,7 +333,7 @@ class SelectStep(Step):
 
     def use(self, path: Path) -> None:
         if path.suffix.lower() not in pipeline.VIDEO_SUFFIXES or not path.is_file():
-            QMessageBox.warning(self, APP_NAME, f"Not a video VVideo can read:\n{path}")
+            QMessageBox.warning(self, APP_NAME, f"Not a video Gameplay AutoCut can read:\n{path}")
             return
         try:
             info = video_io.probe(path)
@@ -340,27 +342,18 @@ class SelectStep(Step):
             QMessageBox.warning(self, APP_NAME, f"Could not read {path.name}:\n{error}")
             return
         if tracks == 0:
-            QMessageBox.warning(self, APP_NAME, f"{path.name} has no audio — VVideo finds moments by their sound.")
+            QMessageBox.warning(self, APP_NAME, f"{path.name} has no audio — Gameplay AutoCut finds moments by their sound.")
             return
         self.source = path
         self.prefs.set("app/source_dir", str(path.parent))
         self.file_label.setText(path.name)
         audio = "1 audio track" if tracks == 1 else f"{tracks} audio tracks"
         self.info_label.setText(f"{info.width}×{info.height} · {info.fps:.0f} fps · {clock(info.duration)} · {audio}")
-        self._tracks(tracks)
         self.next_button.setEnabled(True)
-
-    def _tracks(self, count: int) -> None:
-        self.voice_combo.clear()
-        self.voice_combo.addItem("mixed with the game (one track)", None)
-        for track in range(1, count):
-            self.voice_combo.addItem(f"track {track + 1}", track)
-        self.voice_label.setVisible(count > 1)
-        self.voice_combo.setVisible(count > 1)
 
     def _next(self) -> None:
         if self.source is not None:
-            self.chosen.emit(self.source, self.voice_combo.currentData())
+            self.chosen.emit(self.source, None)  # None: the voice track is detected
 
     def dragEnterEvent(self, event) -> None:
         if event.mimeData().hasUrls():
@@ -407,15 +400,22 @@ class AnalyseStep(Step):
         self.log.setMaximumBlockCount(300)
         self.log.setFixedHeight(150)
         inner.addWidget(self.log)
-        hint = QLabel("VVideo listens to the whole recording and looks at it 10 times a second. The first time, it "
-                      "downloads its speech, sound and vision models (about 1.9 GB, plus 1.3 GB of GPU libraries "
-                      "on NVIDIA cards). After that, a 30-minute recording takes about a minute, and a recording "
-                      "analysed before opens instantly.")
+        hint = QLabel("Gameplay AutoCut listens to the whole recording, looks at it 10 times a second, reads the text on "
+                      "screen, and then an AI (offline, on your GPU) watches the best moments and judges them. The "
+                      "first time it downloads its models (about 5 GB, plus 1.3 GB of GPU libraries on NVIDIA "
+                      "cards). A recording analysed before opens instantly.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: palette(mid);")
         inner.addWidget(hint)
         row = QHBoxLayout()
         row.addStretch(1)
+        self.enough_button = QPushButton("Use what we have  ▶")
+        self.enough_button.setMinimumHeight(32)
+        self.enough_button.setToolTip("Stop the AI review now and show the moments: reviewed ones use the AI's "
+                                      "judgement, the rest the detectors' score.")
+        self.enough_button.clicked.connect(self._enough)
+        self.enough_button.setVisible(False)
+        row.addWidget(self.enough_button)
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setMinimumHeight(32)
         self.cancel_button.clicked.connect(self._cancel)
@@ -435,11 +435,15 @@ class AnalyseStep(Step):
         self.bar.setRange(0, 100)
         self.bar.setValue(0)
         self.cancel_button.setEnabled(True)
+        self.enough_button.setVisible(False)
+        self.enough_button.setEnabled(True)
         cancel = video_io.Canceller()
+        self.skip = threading.Event()
+        skip = self.skip
 
         def job(log, progress):
             span = pipeline.Span(progress)
-            analysis = find_moments(source, voice_track=voice, log=log,
+            analysis = find_moments(source, voice_track=voice, log=log, review_skip=skip,
                                     progress=span.slice(0, 0.95).counting(), cancel=cancel)
             thumbs = span.slice(0.95, 1)
             if analysis.moments:
@@ -457,6 +461,15 @@ class AnalyseStep(Step):
         if line.strip():
             self.log.appendPlainText(line.rstrip())
             self.status.setText(line.strip().splitlines()[-1])
+            if "AI review" in line and "stopped" not in line:
+                self.enough_button.setVisible(True)
+            if "Thumbnails" in line:
+                self.enough_button.setVisible(False)
+
+    def _enough(self) -> None:
+        self.enough_button.setEnabled(False)
+        self.status.setText("Finishing the review in progress, then showing the moments…")
+        self.skip.set()
 
     def _progress(self, done: int, total: int) -> None:
         if total > 0:
@@ -729,6 +742,11 @@ class PickStep(Step):
                   else " · sound only")
         if seen and seen.get("menu_seconds"):
             looked += f" · {clock(seen['menu_seconds'])} of menus and maps left out (grey)"
+        if analysis.voice:
+            looked += f" · voice: {analysis.voice['detail']}"
+        if analysis.review:
+            r = analysis.review
+            looked += f" · AI reviewed {r['reviewed']} of {r['planned']}" + (" (stopped early)" if r["skipped"] else "")
         self.summary.setText(f"<b>{analysis.path.name}</b> · {len(analysis.moments)} moments in "
                              f"{clock(analysis.duration)}{looked} · tick the ones you want as shorts")
         plain = self.summary.text().replace("<b>", "").replace("</b>", "")
@@ -755,6 +773,8 @@ class PickStep(Step):
         # No emoji on the card itself: in icon mode Qt measures the line without the emoji font's
         # height and elides everything after it. The filter and the line under the player keep them.
         kind = moment.label.upper() + (f" · {moment.label2}" if moment.label2 else "")
+        if moment.ai:
+            kind = f"AI {moment.ai['score']}/10 · {_plain(moment.ai['title'])[:34]}"
         item.setText(f"#{index + 1} · score {moment.score}\n{kind}\n{clock(start)} · {end - start:.0f}s")
 
     def _filter(self) -> None:
@@ -808,8 +828,11 @@ class PickStep(Step):
         self.range_label.setText(f"{clock(start)} → {clock(end)} · {end - start:.1f}s")
         moment = self.analysis.moments[self.current]
         level = f" <span style='color:#8d8d8d'>· {moment.level} confidence</span>" if moment.level else ""
-        self.why_label.setText(f"<b>{ICONS.get(moment.label, '')} #{self.current + 1}</b> "
-                               f"{moment.explanation}{level}")
+        text = f"<b>{ICONS.get(moment.label, '')} #{self.current + 1}</b> {moment.explanation}{level}"
+        if moment.ai:
+            text = (f"<b>{ICONS.get(moment.label, '')} {moment.ai['title']}</b> — AI {moment.ai['score']}/10<br>"
+                    f"{moment.ai['description']}<br><span style='color:#8d8d8d'>{moment.explanation}</span>")
+        self.why_label.setText(text)
         item = self.cards.currentItem()
         if item is not None:
             self._label(item)
@@ -862,7 +885,8 @@ class PickStep(Step):
 
     def _next(self) -> None:
         picked = sorted(self.picked_indices(), key=lambda i: self.ranges[i][0])
-        clips = [(*self.ranges[i], self.analysis.moments[i].peak, self.analysis.moments[i].label) for i in picked]
+        clips = [(*self.ranges[i], self.analysis.moments[i].peak, self.analysis.moments[i].label,
+                  self.analysis.moments[i].ai or {}) for i in picked]
         if clips:
             self.proceed.emit(clips)
 
@@ -957,7 +981,7 @@ class ShortsStep(Step):
         super().__init__()
         self.prefs = prefs
         self.analysis: Analysis | None = None
-        self.clips: list[tuple[float, float, float, str]] = []
+        self.clips: list[tuple[float, float, float, str, dict]] = []
         self.written: list[Path] = []
         self.render_runner = JobRunner(self)
         self.render_runner.message.connect(self._message)
@@ -1038,17 +1062,18 @@ class ShortsStep(Step):
         right.addLayout(buttons)
         layout.addLayout(right, 1)
 
-    def prepare(self, analysis: Analysis, clips: list[tuple[float, float, float, str]]) -> None:
+    def prepare(self, analysis: Analysis, clips: list[tuple[float, float, float, str, dict]]) -> None:
         self.analysis, self.clips, self.written = analysis, clips, []
-        total = sum(end - start for start, end, _peak, _label in clips)
+        total = sum(c[1] - c[0] for c in clips)
         self.summary.setText(f"{len(clips)} clip{'s' if len(clips) != 1 else ''} from <b>{analysis.path.name}</b> · "
                              f"{total:.0f}s in all · 1080×1920 MP4")
         self.clip_list.clear()
         self.preview_combo.blockSignals(True)
         self.preview_combo.clear()
-        for number, (start, end, _peak, label) in enumerate(clips, start=1):
+        for number, (start, end, _peak, label, ai) in enumerate(clips, start=1):
             name = pipeline.moment_name(analysis.path, start)
-            self.clip_list.addItem(f"{number}.  {ICONS.get(label, '')} {label:<12} {clock(start)} → {clock(end)}  "
+            what = ai.get("title") or label
+            self.clip_list.addItem(f"{number}.  {ICONS.get(label, '')} {what[:48]}   {clock(start)} → {clock(end)}  "
                                    f"({end - start:.0f}s)   →  {name}")
             self.preview_combo.addItem(f"clip {number} · {clock(start)}", number - 1)
         self.preview_combo.blockSignals(False)
@@ -1170,6 +1195,7 @@ class ShortsStep(Step):
 
     def _rendered(self, written: list[Path]) -> None:
         self.written = written
+        self._write_titles(written)
         self.bar.setValue(self.bar.maximum())
         self.status.setText(f"✅ {len(written)} short{'s' if len(written) != 1 else ''} saved to {self._dest()}")
         for row, path in enumerate(written):
@@ -1177,6 +1203,25 @@ class ShortsStep(Step):
             if item is not None:
                 item.setText("✅  " + item.text())
         self._set_mode("done")
+
+    def _write_titles(self, written: list[Path]) -> None:
+        """Titles and descriptions beside the shorts, ready to paste when posting."""
+        if self.analysis is None or not written:
+            return
+        lines = []
+        for path, clip in zip(written, self.clips):
+            ai = clip[4] if len(clip) > 4 else {}
+            lines.append(path.name)
+            if ai.get("title"):
+                lines.append(f"  Title: {ai['title']}")
+            if ai.get("description"):
+                lines.append(f"  Description: {ai['description']}")
+            lines.append("")
+        target = written[0].parent / f"{self.analysis.path.stem}_titles.txt"
+        try:
+            target.write_text("\n".join(lines), encoding="utf-8")
+        except OSError:
+            pass
 
     def _render_failed(self, error: str) -> None:
         QMessageBox.critical(self, APP_NAME, f"The shorts could not be made:\n{error}")

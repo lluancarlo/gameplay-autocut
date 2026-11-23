@@ -4,12 +4,13 @@ __pycache__/
 *.pyc
 
 # PyInstaller: build/ is intermediate, publish/ holds the app that is rebuilt from
-# VVideo.spec in one command. Neither belongs in the history.
+# GameplayAutoCut.spec in one command. Neither belongs in the history.
 build/
 publish/
 *.manifest
 
 # Downloaded models and analysis caches.
+GameplayAutoCut-data/
 VVideo-data/
 
 # Output. Everything the job writes, plus the window's default target.
@@ -37,6 +38,7 @@ out/
 
 # Portable settings file the window writes beside the .exe, and only when a
 # setting differs from its default. Machine-specific, never the project's.
+GameplayAutoCut.ini
 VVideo.ini
 
 # Ad-hoc evaluation runs. eval/baseline/ is committed, runs are not.

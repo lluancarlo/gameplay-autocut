@@ -24,7 +24,7 @@ STATUSES = ("draft", "reviewed")
 
 
 def default_folder() -> Path:
-    """The repo's eval/ when running from source; VVideo-data/eval beside the .exe."""
+    """The repo's eval/ when running from source; GameplayAutoCut-data/eval beside the .exe."""
     if getattr(sys, "frozen", False):
         return config.DATA_DIR / "eval"
     return config.ROOT / "eval"

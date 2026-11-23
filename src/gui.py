@@ -1,4 +1,4 @@
-"""VVideo's window: a long recording in, vertical shorts of its best moments out.
+"""Gameplay AutoCut's window: a long recording in, vertical shorts of its best moments out.
 
 This module holds what the whole app shares -- where files go, the settings
 file, the background Worker, the zoom bar -- and the main window, which walks
@@ -33,12 +33,13 @@ from PySide6.QtWidgets import (
 
 from . import config, sysmon, video_io
 
-APP_NAME = "VVideo"
+APP_NAME = "Gameplay AutoCut"
+TAGLINE = "A totally offline solution to transform gameplay into viral clips"
 
 # Beside the project root when running from source, and unpacked next to
 # config/ in the frozen build -- config._root() already knows which is which.
-# This is the *window* icon: the .exe's own icon is set in VVideo.spec.
-ICON_PATH = config.ROOT / "vvideo-icon.png"
+# This is the *window* icon: the .exe's own icon is set in GameplayAutoCut.spec.
+ICON_PATH = config.ROOT / "gameplay-autocut-logo.png"
 
 
 @lru_cache(maxsize=1)
@@ -75,7 +76,7 @@ def default_output() -> Path:
 
 
 def _drop_legacy_registry_key() -> None:
-    """Remove HKCU\\Software\\VVideo once nothing is left in it.
+    """Remove HKCU\\Software\\VVideo (the old name) once nothing is left in it.
 
     QSettings empties the values but leaves the keys themselves standing, and
     an empty key is still a key -- exactly the trace this build is trying not
@@ -85,7 +86,8 @@ def _drop_legacy_registry_key() -> None:
         return
     import winreg
 
-    for path in (rf"Software\{APP_NAME}\{APP_NAME}", rf"Software\{APP_NAME}"):
+    legacy = config.LEGACY_NAME
+    for path in (rf"Software\{legacy}\{legacy}", rf"Software\{legacy}"):
         try:
             winreg.DeleteKey(winreg.HKEY_CURRENT_USER, path)
         except OSError:
@@ -101,7 +103,7 @@ def adopt_legacy_settings() -> None:
     this build carries the values across and takes the key with it. On a
     machine that never ran an older build this finds nothing and does nothing.
     """
-    legacy = QSettings(APP_NAME, APP_NAME)
+    legacy = QSettings(config.LEGACY_NAME, config.LEGACY_NAME)
     keys = legacy.allKeys()
     if keys:
         target = QSettings(str(settings_file()), QSettings.Format.IniFormat)
@@ -134,24 +136,25 @@ def same(value: object, default: object) -> bool:
 
 
 def settings_file() -> Path:
-    """Where preferences live: VVideo.ini beside the executable.
+    """Where preferences live: GameplayAutoCut.ini beside the executable.
 
-    QSettings would otherwise default to HKCU\\Software\\VVideo on Windows --
-    a registry key left behind on a machine that only ever ran a portable .exe.
-    An ini file next to the .exe keeps the whole app in one place: delete it
-    and nothing of VVideo remains. Written only when a value actually differs
-    from its default, and removed again when none do, so the common case leaves
-    no file at all. See steps.Prefs.
+    QSettings would otherwise default to the registry on Windows -- a key left
+    behind on a machine that only ever ran a portable .exe. An ini file next to
+    the .exe keeps the whole app in one place: delete it and nothing remains.
+    Written only when a value actually differs from its default, and removed
+    again when none do. A VVideo.ini from before the rename is adopted.
 
     sys.executable, not config.ROOT: in the frozen build ROOT is the temporary
     unpack directory, which is gone the moment the process ends.
     """
-    base = (
-        Path(sys.executable).resolve().parent
-        if getattr(sys, "frozen", False)
-        else config.ROOT
-    )
-    return base / f"{APP_NAME}.ini"
+    home = config._home()
+    file, legacy = home / f"{config.FILE_NAME}.ini", home / f"{config.LEGACY_NAME}.ini"
+    if not file.exists() and legacy.is_file():
+        try:
+            legacy.rename(file)
+        except OSError:
+            return legacy
+    return file
 
 
 # How often the strip along the bottom re-reads CPU, GPU and memory. Fast
@@ -417,7 +420,7 @@ class MainWindow(QMainWindow):
             # Killing a running ffmpeg or a half-written mp4 on a stray click is
             # worth one confirmation.
             answer = QMessageBox.question(
-                self, APP_NAME, "VVideo is still working. Stop it and quit?",
+                self, APP_NAME, f"{APP_NAME} is still working. Stop it and quit?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )

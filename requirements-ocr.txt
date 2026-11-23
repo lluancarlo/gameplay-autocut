@@ -1,0 +1,19 @@
+# Text on screen (RapidOCR, PP-OCRv6 models bundled, Apache-2.0). Install WITHOUT dependencies:
+#   pip install --no-deps -r requirements-ocr.txt
+# RapidOCR asks for opencv-python-headless, which installs the same cv2 as opencv-python and breaks
+# it; everything else it needs is listed here, and it uses the onnxruntime-directml already installed.
+rapidocr==3.10.0
+pyclipper
+shapely
+pyyaml
+pillow
+tqdm
+omegaconf
+antlr4-python3-runtime==4.9.3
+colorlog
+six
+requests
+urllib3
+idna
+certifi
+charset-normalizer
