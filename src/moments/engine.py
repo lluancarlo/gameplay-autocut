@@ -35,6 +35,7 @@ class Moment:
     explanation: str = ""
     motion: dict | None = None      # camera / local optical-flow summary, for the strongest moments only
     detector_score: int = 0         # the score before the AI review
+    marked: float | None = None     # the player said "clipar agora" at this second
     ai: dict | None = None          # the AI review: score 0-10, title, description, event
 
     @property
@@ -54,6 +55,9 @@ class Analysis:
     vision: dict | None = None   # summary of the visual pass (frames, fps, provider, seconds), None if skipped
     voice: dict | None = None    # whose voice was heard: voice.Voice.summary()
     review: dict | None = None   # the AI review's summary: judge.review()
+    player_words: list = field(default_factory=list)   # the player's words, for captions
+    subtitles: list = field(default_factory=list)      # the game's on-screen subtitles (OCR), for captions
+    markers: list = field(default_factory=list)        # "clipar agora" markers [{"t", "end"}]
 
     def to_json(self) -> dict:
         return {"path": str(self.path), "duration": self.duration, "language": self.language,
@@ -90,16 +94,16 @@ def _sounds(samples, cache: Path, log, span: Span, cancel) -> dict:
     return result
 
 
-def _speech(samples, cache: Path, log, span: Span, cancel) -> tuple[str, list[Word]]:
-    file = cache / "words-v2.json"   # v2: every word carries its passage's language
+def _speech(samples, cache: Path, log, span: Span, cancel) -> tuple[str, list[Word], list[dict]]:
+    file = cache / "words-v3.json"   # v3: words carry their passage's language, plus "clipar agora" markers
     if file.is_file():
         data = json.loads(file.read_text(encoding="utf-8"))
-        return data["language"], [Word(**w) for w in data["words"]]
+        return data["language"], [Word(**w) for w in data["words"]], data.get("markers", [])
     log("   📝 Transcribing…")
-    language, words = speech.transcribe(samples, log, span.counting(), cancel)
-    file.write_text(json.dumps({"language": language, "words": [asdict(w) for w in words]},
+    language, words, marks = speech.transcribe(samples, log, span.counting(), cancel)
+    file.write_text(json.dumps({"language": language, "words": [asdict(w) for w in words], "markers": marks},
                                ensure_ascii=False), encoding="utf-8")
-    return language, words
+    return language, words, marks
 
 
 def _label(moment: Moment, ctx, motion_summary: dict | None = None) -> None:
@@ -346,6 +350,39 @@ def _chase_start(start: float, end: float, peak: int, wanted: list[float], clip:
     return min(start, begin) if end - begin <= clip["max"] else start
 
 
+def _marked(mark: dict, curve, activity, menu_runs, words, cfg: dict, vis) -> Moment | None:
+    """The clip before a "clipar agora": it ends just before the phrase, and starts where the action does."""
+    clip, mcfg = cfg["clip"], cfg["markers"]
+    end = max(0.0, mark["t"] - 0.3)
+    peak = max(0, min(len(curve) - 1, int(end) - 1))
+    start, end = _onset(max(0.0, end - mcfg["default_s"]), end, peak, activity,
+                        dict(clip, onset=dict(clip["onset"], lookback_s=mcfg["lookback_s"])))
+    if vis is not None:
+        start, end = _avoid_menus(start, end, peak, menu_runs, clip)
+    start, end = _snap(start, end, words)
+    end = min(end, mark["t"] - 0.3)
+    if end - start < 3:
+        return None
+    window = curve[int(start):max(int(start) + 1, int(end))]
+    score = max(mcfg["min_score"], round(100 * min(1.0, float(window.max()) / cfg["peaks"]["full_score"])))
+    moment = Moment(round(start, 2), round(end, 2), float(peak), int(score), [])
+    moment.marked = mark["t"]
+    return moment
+
+
+def _snap_cuts(start: float, end: float, cuts: list[float], clip: dict) -> tuple[float, float]:
+    """Begin on a shot change and end before one, when one is within reach: no clip opens a second
+    before a cut to a new scene or closes a second into one."""
+    reach = clip["scene_cut"]["snap_s"]
+    near_start = [c for c in cuts if abs(c - start) <= reach]
+    if near_start:
+        start = min(near_start, key=lambda c: abs(c - start)) + 0.05
+    near_end = [c for c in cuts if abs(c - end) <= reach and c - start >= clip["min"]]
+    if near_end:
+        end = min(near_end, key=lambda c: abs(c - end)) - 0.05
+    return round(start, 2), round(end, 2)
+
+
 def _vision(path: Path, duration: float, cache: Path, cfg: dict, log, span: Span, cancel):
     """The SigLIP 2 pass (M2): embeddings of every sampled frame, cached. None if off or unavailable.
 
@@ -496,7 +533,7 @@ def find_moments(
     if voice_index != track:
         (cache / "voice").mkdir(exist_ok=True)
         reaction_tags = _sounds(voice_samples, cache / "voice", log, whole.slice(0.22, 0.27), cancel)
-    language, words = _speech(voice_samples, cache, log, whole.slice(0.27, 0.55), cancel)
+    language, words, marks = _speech(voice_samples, cache, log, whole.slice(0.27, 0.55), cancel)
     seen = _vision(path, duration, cache, cfg.get("vision", {}), log, whole.slice(0.55, 0.72), cancel)
     vis = _visual(seen, n, cfg, log)
 
@@ -574,8 +611,16 @@ def find_moments(
         _label(moment, ctx)
         candidates.append(moment)
 
+    for mark in marks:
+        moment = _marked(mark, curve, activity, menu_runs, words, cfg, vis)
+        if moment is not None:
+            moment.reasons = ['said "clipar agora"'] + _reasons(curves, shares, int(moment.peak), sound_labels, hits)
+            _label(moment, ctx)
+            candidates.append(moment)
+
     moments: list[Moment] = []
-    for moment in sorted(candidates, key=lambda m: -m.score):
+    # A moment the player marked always survives an overlap; then the strongest wins.
+    for moment in sorted(candidates, key=lambda m: (m.marked is None, -m.score)):
         if all(moment.end <= m.start or moment.start >= m.end for m in moments):
             moments.append(moment)
     if vis is not None:
@@ -596,7 +641,14 @@ def find_moments(
     if cfg.get("judge", {}).get("enabled", False) and moments:
         review = judge.review(path, duration, moments, heard, screen, cfg["judge"], cache, log=log,
                               progress=whole.slice(0.84, 0.995).counting(), cancel=cancel, skip=review_skip)
-    moments.sort(key=lambda m: -m.score)
+    if seen is not None:
+        cuts = visual.scene_cuts(seen, cfg["clip"]["scene_cut"]["threshold"])
+        for moment in moments:
+            moment.start, moment.end = _snap_cuts(moment.start, moment.end, cuts, cfg["clip"])
+    for moment in moments:
+        if moment.marked is not None:
+            moment.end = min(moment.end, moment.marked - 0.3)
+    moments.sort(key=lambda m: -m.score)   # marked moments are always kept, ranked like the rest
     whole.done()
     log(f"   ✨ {len(moments)} moments")
     shown = {k: v.round(4).tolist() for k, v in curves.items()}
@@ -609,5 +661,7 @@ def find_moments(
         summary["menu_skipped"] = skipped
     if screen is not None and summary is not None:
         summary["text_events"] = len(text_events)
+    subtitles = [l for l in screen.lines if l["zone"] == "subtitle"] if screen is not None else []
     return Analysis(path, duration, language, moments, curve.round(4).tolist(), cache, shown, summary,
-                    voice=heard.summary(), review=review)
+                    voice=heard.summary(), review=review, player_words=list(heard.player_words),
+                    subtitles=subtitles, markers=marks)

@@ -25,11 +25,16 @@ The window walks you through four steps:
    second and reads text on screen. A local AI then watches the best candidates
    and scores each one 0–10, with a title and a description.
 3. **Pick clips**: preview each moment, trim it, and tick the ones you want.
-4. **Make shorts**: check the vertical framing and generate the clips. A
-   `_titles.txt` file is written next to them, ready to paste when you post.
+4. **Make shorts**: choose the framing (blurred bars, or follow the action),
+   captions (your voice + the game's dialogue), an optional teaser that opens
+   with the best second and jump cuts over dead seconds, then generate. The
+   sound is levelled for the platforms, and the game ducks under your mic. A `_titles.txt` file is written next to
+   them, ready to paste when you post.
 
 Your voice is detected automatically, whether it is on its own audio track or
-mixed with the game. Menus, maps and pause screens are left out.
+mixed with the game. Say **"clipar agora"** while playing and the moment you just
+played becomes a clip, scored by the AI like the rest. Menus, maps and pause
+screens are left out.
 
 ## Run from source
 

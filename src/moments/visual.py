@@ -91,3 +91,18 @@ def build(emb: Embeddings, bank: concepts.Bank, n: int, cfg: dict, describe: dic
     nov = novelty(emb.per_second(n), cfg["novelty"])
     strongest = np.max([rel[name] for name in events], axis=0) if events else np.zeros(n)
     return Visual(logits, rel, nov, menu, strongest * (1 - menu), describe)
+
+
+def scene_cuts(emb: Embeddings, threshold: float, min_gap: float = 1.0) -> list[float]:
+    """Seconds where the picture jumps to another shot: consecutive frames (10 per second) whose
+    embeddings are less alike than `threshold`. Camera movement changes them slowly; a cut, at once."""
+    if emb.frames < 2:
+        return []
+    vectors = emb.vectors.astype(np.float32)
+    similarity = (vectors[1:] * vectors[:-1]).sum(axis=1)
+    cuts: list[float] = []
+    for index in np.flatnonzero(similarity < threshold):
+        t = float(emb.times[index + 1])
+        if not cuts or t - cuts[-1] >= min_gap:
+            cuts.append(round(t, 2))
+    return cuts

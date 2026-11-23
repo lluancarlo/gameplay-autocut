@@ -366,13 +366,97 @@ def preview_clip(
     dest: Path,
     *,
     settings: shorts.Settings | None = None,
+    mode: str = "bars",
     cancel: video_io.Canceller | None = None,
 ) -> Path:
     """One frame of `source` at `at` seconds, composited exactly as the short will be."""
+    from . import composer
+    from .moments import motion
+
     settings = settings or shorts.Settings.load()
-    layout = shorts.plan(video_io.probe(source), settings)
+    info = video_io.probe(source)
+    if mode == "follow":
+        track = motion.focus_track(source, max(0.0, at - 2), at + 2, info.width / info.height,
+                                   cancel or video_io.Canceller())
+        x = min(track, key=lambda k: abs(k[0] - min(at, 2.0)))[1]
+        graph = composer.follow_graph("0:v", "out", info, settings, [(0.0, x)])
+        return video_io.render_still(source, dest, graph, at, out_label="out", cancel=cancel)
+    layout = shorts.plan(info, settings)
     graph, label = shorts.filtergraph(layout, settings)
     return video_io.render_still(source, dest, graph, at, out_label=label, cancel=cancel)
+
+
+def make_shorts(
+    source: Path,
+    items: list[dict],
+    dest_dir: Path,
+    *,
+    settings: shorts.Settings | None = None,
+    mode: str = "bars",
+    teaser: bool = False,
+    captions: bool = True,
+    words: list | None = None,
+    subtitles: list | None = None,
+    trim: bool = False,
+    curve: list | None = None,
+    voice_track: int | None = None,
+    log: Log = _ignore,
+    progress: Progress = _ignore,
+    cancel: video_io.Canceller | None = None,
+) -> list[Path]:
+    """Render each item ({start, end, peak, best_at}) as a finished short: teaser, captions, framing.
+
+    trim cuts the clip's dead seconds (needs `curve`, the analysis' per-second moment curve);
+    voice_track is the player's own microphone track, which the game ducks under."""
+    from . import captions as caption_files, composer, config
+    from .moments import audio, motion
+
+    cancel = cancel or video_io.Canceller()
+    settings = settings or shorts.Settings.load()
+    info = video_io.probe(source)
+    tracks = audio.track_count(source)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    total = sum(i["end"] - i["start"] for i in items) or 1.0
+    span = Span(progress)
+    done, written = 0.0, []
+    log(f"🎬 {_count(len(items), 'short')} from {source.name} · {settings.canvas_w}×{settings.canvas_h} · {mode}"
+        + (" · teaser" if teaser else "") + (" · captions" if captions else "")
+        + (" · dead seconds cut" if trim and curve else "") + (" · game ducked under your voice"
+                                                               if voice_track is not None and tracks > 1 else ""))
+    talking = [(w.start, w.end) for w in words or []] + [(s["t"] - 1.0, s["t"] + 1.0) for s in subtitles or []]
+    for index, item in enumerate(items, start=1):
+        cancel.check()
+        start, end = item["start"], item["end"]
+        share = span.slice(done / total, (done + end - start) / total)
+        dest = dest_dir / moment_name(source, start)
+        if dest.resolve() == source.resolve():
+            raise RuntimeError(f"Output would overwrite the source: {dest}")
+        short = composer.Short(start, end, voice_track=voice_track)
+        best = item.get("best_at") or item.get("peak") or (start + end) / 2
+        best = min(max(best, start + 0.75), end - 0.75)   # bounds may have been moved in step 3
+        if teaser:
+            short.teaser_at = best
+        if trim and curve:
+            short.segments = composer.keep_segments(start, end, curve, talking, [best],
+                                                    composer.trim_settings())
+        cut = (end - start) - sum(b - a for a, b in short.pieces)
+        log(f"   🎞️  {index}/{len(items)} · {clock(start)} → {clock(end)} ({end - start:.0f}s"
+            + (f", {cut:.0f}s of dead time cut" if cut >= 1 else "") + ")")
+        if mode == "follow":
+            short.focus = motion.focus_track(source, start, end, info.width / info.height, cancel)
+        if captions:
+            ass = config.DATA_DIR / "captions" / f"{dest.stem}.ass"
+            short.captions = caption_files.write(ass, start, end, voice_words=words, subtitles=subtitles,
+                                                 offset=short.teaser, follow=mode == "follow",
+                                                 pieces=short.pieces)
+        composer.render(source, dest, short, settings, info, mode=mode, audio_tracks=min(tracks, 4),
+                        progress=share.counting(), cancel=cancel)
+        share.done()
+        done += end - start
+        written.append(dest)
+        log(f"      ✅ {dest.name}")
+    span.done()
+    return written
 
 
 def clock(seconds: float) -> str:

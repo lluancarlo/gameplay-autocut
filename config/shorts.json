@@ -24,6 +24,27 @@
     "_blur_note": "The blur runs on a 1/blur_downscale-size copy and is scaled back up, so the effective full-resolution sigma is blur_sigma * blur_downscale (8 * 8 = 64). A real sigma-64 gaussian over a 1080x1920 plane is the slowest filter in the graph by a wide margin and looks the same -- past a certain radius the upscale interpolation IS the blur. Raise blur_downscale for speed, blur_sigma for a softer fill."
   },
 
+  "audio": {
+    "_note": "Shorts are normalised to the loudness platforms play at (loudness_lufs, true_peak_db), so none is too quiet or distorts. When the player's voice has its own track, the game ducks under it (sidechain compression: duck_threshold 0..1, duck_ratio, duck_release_ms) and the voice gets a light FFT denoise (denoise_nf dB; null turns it off).",
+    "loudness_lufs": -14,
+    "true_peak_db": -1.5,
+    "duck": true,
+    "duck_threshold": 0.01,
+    "duck_ratio": 8,
+    "duck_release_ms": 400,
+    "denoise_nf": -25
+  },
+
+  "trim": {
+    "_note": "Cut dead seconds (step 4 checkbox): a second is dead below `level` of the clip's own peak on the moment curve with nobody talking (the player or on-screen game dialogue). Runs of at least min_s seconds are cut, keeping keep_s on each side. The first/last edge_s seconds and protect_s around the peak/teaser are never cut, and a clip never drops below min_length_s.",
+    "level": 0.25,
+    "min_s": 3,
+    "keep_s": 0.5,
+    "edge_s": 2,
+    "protect_s": 3,
+    "min_length_s": 12
+  },
+
   "crop": {
     "_note": "Blanking Fill's Crop Left/Right/Top/Bottom, in pixels, inset from the foreground's edges before it is placed. All 0 in the manual setup; here for parity with the effect's controls.",
     "left": 0,

@@ -5,6 +5,60 @@ no application code, dependency or model has changed.
 
 ---
 
+## Revision 10 — 2026-11-23 — clean audio, jump cuts; where the time goes
+
+**Shorts** (`src/composer.py`, `config/shorts.json`):
+- **Loudness**: every short is normalised to −14 LUFS / −1.5 dBTP (`loudnorm`), the level the platforms play
+  at. Measured: −15.1 LUFS on a test short (single-pass loudnorm lands ~1 LU under).
+- **Ducking**: when the player's microphone has its own track, the game ducks under it (sidechain compressor,
+  threshold 0.01, ratio 8 → the game drops ~9 dB while you talk; measured −29.7 → −38.5 dB) and the voice
+  gets a light FFT denoise.
+- **Cut dead seconds** (step 4 checkbox, on): runs of ≥ 3 s below 25 % of the clip's own peak with nobody
+  talking become jump cuts (0.5 s kept each side, 20 ms audio fades); never the first/last 2 s, never ±3 s
+  around the peak/teaser, never below 12 s. GTA-6: 4 of the top 10 clips lose 4–7 s (the bridge jump loses
+  the wait at the railing). Captions follow the cuts.
+
+**Speed — measured, cold, 2-hour stream (523 s):** OCR 228 s (44 %), vision 139 s (27 %), AI review 93 s
+(18 %), transcription 33 s (6 %), the rest 30 s. Findings:
+- OCR is 81 ms/frame on DirectML (detection 43, recognition 38), ~2,800 frames: around-action reach covers
+  79 % of the stream; shrinking it saves little and loses outcome texts (reach 8 s: 69 %, 5/7 kept).
+  Native-size detection: −12 %, 7 % fewer texts. Models are already the small PP-OCRv6 ones.
+- Running OCR and vision together: two DirectML sessions in one process crash; with a shared GPU lock the
+  total is unchanged (428 s vs ~435 s) — both stages are GPU-bound.
+- AI server start is 3 s; batched Whisper would save at most ~20 s.
+- → Remaining real gains need less GPU work (e.g. vision at fewer frames per second away from candidates),
+  which trades against the 10 fps precision the user asked for. Not changed.
+
+## Revision 9 — 2026-11-23 — result improvements (hook, captions, markers, framing)
+
+Asked by the user: "todas as melhorias de resultado (do 1 ao 8)". Decisions: optional teaser; captions for the
+player's voice + the game's dialogue; test 4B vs 8B and keep 8B only if clearly better; a voice marker
+"clipar agora" that the AI also reviews and scores.
+
+1. **Hook**: clips open 2 s before the action (`onset.pre_roll_s` 5 → 2; judge `pre_roll_s` 3 → 1.5). Optional
+   **Teaser** (step 4): the short opens with 1.5 s around the AI's `best_moment_at`, kept inside the clip.
+2. **Length**: `clip.max` 45 → 35, `ideal` 22 (Shorts retain best at 15–35 s).
+3. **Captions** (step 4, on by default; `src/captions.py`, libass): the player's words big at the bottom, 4 words
+   at a time, the one being said in yellow; the game's subtitles (OCR) boxed at the top.
+4. **Judge sees 16 frames** (448 px) instead of 8 (512 px), to place the start.
+5. **Titles**: prompt with good pt-BR examples (never reused), then a bubble pass comparing the top 8 two by two.
+   **4B vs 8B** on the 2-hour stream (33 reviews each): 8B 124 s vs 4B 92 s; 8B's Portuguese is more natural but
+   it ranked the bridge jump 8th (4B: 2nd), copied a title example twice, and needs +5.8 GB → **4B stays**
+   (`judge.model`, "8b" selectable). Judge cache key carries the prompt version.
+6. **Scene cuts**: consecutive 10 fps SigLIP embeddings with cosine < 0.8 are shot changes; start/end snap to one
+   within 1.5 s.
+7. **Follow the action** (Adjust framing → Mode): full-height 9:16 crop whose x follows local motion (flow the
+   camera does not explain, HUD masked), smoothed 1.5 s, as a piecewise ffmpeg crop expression.
+8. **"clipar agora" marker**: matched in the transcript (fuzzy: clipa/clip/clipe a gora/clicar…); suspicious words
+   in English passages are re-heard in Portuguese. Each marker makes a clip ending just before the phrase,
+   starting where the action did (≤ 30 s), kept through overlaps, always AI-reviewed and scored; card shows
+   "MARKED" and "You said 'clipar agora' at mm:ss". Words cache → `words-v3.json`. Test with the Windows pt-BR
+   voice mixed into GTA-6.mp4: "Clipar agora." found; "Nossa, que salto! Clipar agora." was heard as "E para
+   agora" and missed (not matched on purpose: too common a phrase).
+
+Rendering moved to `src/composer.py` (`pipeline.make_shorts`): one ffmpeg call per short with teaser concat,
+all audio tracks mixed, captions, bars or follow mode. A 20 s short renders in ~3 s with NVENC.
+
 ## Revision 8 — 2026-11-23 — usable MVP for GTA 6 (offline)
 
 Scope decided with the user: GTA 6 only for now; fully offline; no camera; the player's voice may or may not be

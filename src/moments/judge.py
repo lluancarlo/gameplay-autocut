@@ -36,18 +36,40 @@ RUNTIME = {
     "size_mb": 39,
     "licence": "MIT",
 }
-MODEL = {
-    "name": "Qwen3-VL-4B-Instruct",
-    "repo": "Qwen/Qwen3-VL-4B-Instruct-GGUF",
-    "revision": "1cd86afb9a95c410a6038ab3b40d8b578c892266",
-    "files": {
-        "Qwen3VL-4B-Instruct-Q4_K_M.gguf": "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a",
-        "mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf": "30ba2c7dd3127a4561b6cba9d13d0f711c91bdb38742e2f56d73c8cb596bd06d",
+MODELS = {
+    "4b": {
+        "name": "Qwen3-VL-4B-Instruct",
+        "repo": "Qwen/Qwen3-VL-4B-Instruct-GGUF",
+        "revision": "1cd86afb9a95c410a6038ab3b40d8b578c892266",
+        "files": {
+            "Qwen3VL-4B-Instruct-Q4_K_M.gguf": "66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a",
+            "mmproj-Qwen3VL-4B-Instruct-Q8_0.gguf": "30ba2c7dd3127a4561b6cba9d13d0f711c91bdb38742e2f56d73c8cb596bd06d",
+        },
+        "size_mb": 2950,
+        "licence": "Apache-2.0",
     },
-    "size_mb": 2950,
-    "licence": "Apache-2.0",
+    "8b": {
+        "name": "Qwen3-VL-8B-Instruct",
+        "repo": "Qwen/Qwen3-VL-8B-Instruct-GGUF",
+        "revision": "f982a07559d4a2f6c8744d840bf6fccab30eea96",
+        "files": {
+            "Qwen3VL-8B-Instruct-Q4_K_M.gguf": "67d1659bfe71b89d50b45a4ad1a9e5b997e5bb16ce5da66a6a6167abd569e9e2",
+            "mmproj-Qwen3VL-8B-Instruct-Q8_0.gguf": "c6ba85508d82f42590e6eb77d5340369ab6fecf107a7561d809523d8aa5f3bfd",
+        },
+        "size_mb": 5780,
+        "licence": "Apache-2.0",
+    },
 }
-MODEL_ID = "qwen3vl4b-q4km"
+MODEL = MODELS["4b"]
+PROMPT_VERSION = "v3"   # part of the cache key: a new prompt is a new review
+
+
+def model_for(cfg: dict) -> dict:
+    return MODELS.get(cfg.get("model", "4b"), MODEL)
+
+
+def model_id(model: dict) -> str:
+    return model["name"].lower().replace("-", "") + "-q4km-" + PROMPT_VERSION
 EVENTS = ("chase", "escape", "crash", "shootout", "explosion", "stunt", "funny", "fail", "death", "arrest",
           "mission", "exploration", "dialogue", "other")
 SCHEMA = {
@@ -58,9 +80,15 @@ SCHEMA = {
         "title": {"type": "string"},
         "description": {"type": "string"},
         "action_starts_at": {"type": "integer"},
+        "best_moment_at": {"type": "integer"},
         "why": {"type": "string"},
     },
-    "required": ["score", "event", "title", "description", "action_starts_at", "why"],
+    "required": ["score", "event", "title", "description", "action_starts_at", "best_moment_at", "why"],
+}
+PAIR_SCHEMA = {
+    "type": "object",
+    "properties": {"better": {"type": "string", "enum": ["A", "B"]}, "why": {"type": "string"}},
+    "required": ["better", "why"],
 }
 
 
@@ -68,7 +96,7 @@ def _folder() -> Path:
     return models.models_dir() / "judge"
 
 
-def ensure(log) -> tuple[Path, Path, Path]:
+def ensure(log, model: dict = MODEL) -> tuple[Path, Path, Path]:
     """(llama-server.exe, model, projector), downloading once with SHA-256 checks."""
     folder = _folder()
     server = folder / "llama" / "llama-server.exe"
@@ -79,11 +107,11 @@ def ensure(log) -> tuple[Path, Path, Path]:
             archive.extractall(folder / "llama")
         part.unlink()
     paths = []
-    for name, sha in MODEL["files"].items():
+    for name, sha in model["files"].items():
         path = folder / name
         if not path.is_file():
             log(f"   ⬇️  Downloading the AI review model {name} (once)…")
-            url = f"https://huggingface.co/{MODEL['repo']}/resolve/{MODEL['revision']}/{name}"
+            url = f"https://huggingface.co/{model['repo']}/resolve/{model['revision']}/{name}"
             models._download(url, sha, folder / f"{name}.part").replace(path)
         paths.append(path)
     return server, paths[0], paths[1]
@@ -123,14 +151,17 @@ class Server:
             time.sleep(0.5)
         raise RuntimeError("the AI review model did not load in time")
 
-    def ask(self, content: list[dict], max_tokens: int, timeout: float = 180) -> dict:
+    def ask(self, content: list[dict], max_tokens: int, timeout: float = 180, schema: dict | None = None,
+            raw: bool = False) -> dict:
         body = {"messages": [{"role": "user", "content": content}], "temperature": 0, "max_tokens": max_tokens,
-                "response_format": {"type": "json_schema", "json_schema": {"name": "review", "schema": SCHEMA}}}
+                "response_format": {"type": "json_schema",
+                                    "json_schema": {"name": "review", "schema": schema or SCHEMA}}}
         request = urllib.request.Request(f"http://127.0.0.1:{self.port}/v1/chat/completions",
                                          data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=timeout) as reply:
             data = json.loads(reply.read())
-        return parse(data["choices"][0]["message"]["content"])
+        text = data["choices"][0]["message"]["content"]
+        return json.loads(text[text.find("{"):text.rfind("}") + 1]) if raw else parse(text)
 
     def stop(self) -> None:
         if self.process is not None and self.process.poll() is None:
@@ -196,6 +227,9 @@ def dossier(moment, start: float, end: float, heard, screen, game: str) -> str:
             lines.append("Notifications on screen: " + " | ".join(dict.fromkeys(notes))[:400])
     if moment.explanation:
         lines.append("Automatic detectors heard/saw: " + moment.explanation)
+    if getattr(moment, "marked", None) is not None:
+        lines.append('The player said "clipar agora" (clip now) right after this clip: they found what just '
+                     "happened worth clipping. Judge those seconds and say where that action began.")
     return "\n".join(lines)
 
 
@@ -210,26 +244,34 @@ the text above show; do not invent events. Score 0-10 how good this clip is as a
  5-6 something happens (a chase, a fight, a stunt, a funny line) but it is ordinary
  7-8 exciting or funny: a viewer would watch to the end
  9-10 spectacular: a crash, a big escape, an explosion, a wild stunt, a great reaction
-Give the event type, a short catchy title in Brazilian Portuguese (max 60 characters), a one-sentence description in
-Brazilian Portuguese, the second (0-{last}) where the action actually begins, and a short reason in English."""
+Give the event type; a short catchy title in natural Brazilian Portuguese, the way a Brazilian creator would post it
+(max 60 characters, at most one emoji, no hashtags, no literal translations, nothing the frames do not show);
+a one-sentence description in Brazilian Portuguese; the second (0-{last}) where the action actually begins; the
+second (0-{last}) of the single most striking moment (it will open the short as a teaser); and a short reason in
+English. Good titles look like: "Fugi da polícia e capotei no final 😱", "Pulei da ponte e me arrependi",
+"Essa perseguição acabou do pior jeito", "O caminhão voou longe!", "Ninguém esperava esse final" -- write your
+own for what these frames show; never reuse an example."""
 
 
 def review(path: Path, duration: float, moments: list, heard, screen, cfg: dict, cache: Path, *, log, progress,
            cancel: video_io.Canceller, skip: threading.Event | None = None) -> dict:
     """Review the strongest candidates in order; returns a summary. Moments get .ai and a new .score."""
     budget = int(min(cfg["max_reviews"], max(cfg["min_reviews"], round(duration / 60 / cfg["minutes_per_review"]))))
-    queue_ = sorted(moments, key=lambda m: -m.score)[:budget]
-    store_file = cache / f"judge-{MODEL_ID}.json"
+    marked = [m for m in moments if getattr(m, "marked", None) is not None]
+    others = sorted((m for m in moments if getattr(m, "marked", None) is None), key=lambda m: -m.score)
+    queue_ = marked + others[:max(0, budget - len(marked))]   # what the player marked is always reviewed
+    model = model_for(cfg)
+    store_file = cache / f"judge-{model_id(model)}.json"
     store = json.loads(store_file.read_text(encoding="utf-8")) if store_file.is_file() else {}
     todo = [m for m in queue_ if _key(m) not in store]
-    summary = {"model": MODEL["name"], "planned": len(queue_), "reviewed": 0, "skipped": False, "seconds": 0.0}
+    summary = {"model": model["name"], "planned": len(queue_), "reviewed": 0, "skipped": False, "seconds": 0.0}
     server = None
     started = time.perf_counter()
     try:
         if todo:
-            exe, model, mmproj = ensure(log)
-            log(f"   🤖 AI review of the best {len(queue_)} moments ({MODEL['name']}, offline)…")
-            server = Server(exe, model, mmproj, cfg)
+            exe, weights, mmproj = ensure(log, model)
+            log(f"   🤖 AI review of the best {len(queue_)} moments ({model['name']}, offline)…")
+            server = Server(exe, weights, mmproj, cfg)
             server.start(cancel)
         for index, moment in enumerate(queue_, start=1):
             cancel.check()
@@ -255,6 +297,8 @@ def review(path: Path, duration: float, moments: list, heard, screen, cfg: dict,
             _apply(moment, store[key], cfg)
             summary["reviewed"] += 1
             progress(index, len(queue_))
+        if server is not None and not summary["skipped"] and cfg.get("rerank_top", 0) > 1:
+            summary["reranked"] = _rerank(server, path, moments, store, store_file, cfg, log, cancel)
     finally:
         if server is not None:
             server.stop()
@@ -287,6 +331,10 @@ def _judge(server: Server, path: Path, moment, heard, screen, cfg: dict, cancel)
 def _apply(moment, answer: dict, cfg: dict) -> None:
     """Blend the AI score into the ranking and, when it makes sense, move the start to where the action begins."""
     moment.ai = {k: answer.get(k) for k in ("score", "event", "title", "description", "why")}
+    if "best_moment_at" in answer:
+        best = answer.get("window_start", moment.start) + float(answer["best_moment_at"])
+        # The teaser shows something from the clip itself, never from the seconds before it.
+        moment.ai["best_at"] = round(min(max(best, moment.start + 0.75), moment.end - 0.75), 2)
     weight = float(cfg["weight"])
     base = moment.detector_score or moment.score
     moment.score = int(round(weight * answer["score"] * 10 + (1 - weight) * base))
@@ -295,3 +343,46 @@ def _apply(moment, answer: dict, cfg: dict) -> None:
     if moment.start - float(cfg["look_before_s"]) <= proposed < moment.end - 8 and abs(proposed - moment.start) >= 2:
         moment.ai["start_moved_from"] = moment.start
         moment.start = round(proposed, 2)
+
+
+PAIR_PROMPT = """Two candidate clips from the same {game} recording. The first {a} images are clip A in order, the next
+{b} are clip B. Which one makes the better YouTube Short / TikTok on its own -- more exciting, funnier or more
+spectacular from the first seconds? Answer A or B and why, briefly. Clip A: {ta}. Clip B: {tb}."""
+
+
+def _rerank(server: Server, path: Path, moments: list, store: dict, store_file: Path, cfg: dict, log, cancel) -> int:
+    """One bubble pass over the top reviewed moments, comparing neighbours two at a time.
+
+    Absolute 0-10 scores drift from one answer to the next; "which of these two
+    is better" is steadier. Each swap trades the two moments' scores, so the
+    order everywhere (cards, curve) follows the comparison.
+    """
+    top = sorted((m for m in moments if m.ai), key=lambda m: -m.score)[: int(cfg["rerank_top"])]
+    if len(top) < 2:
+        return 0
+    log(f"   🤖 Comparing the top {len(top)} two by two…")
+    swaps = 0
+    for i in range(len(top) - 1):
+        cancel.check()
+        a, b = top[i], top[i + 1]
+        key = f"pair:{_key(a)}|{_key(b)}"
+        if key not in store:
+            pics = [frames(path, m.start, m.end, 4, 384, cancel) for m in (a, b)]
+            if not pics[0] or not pics[1]:
+                continue
+            text = PAIR_PROMPT.format(game=cfg["game"], a=len(pics[0]), b=len(pics[1]),
+                                      ta=a.ai.get("title", ""), tb=b.ai.get("title", ""))
+            content = [{"type": "text", "text": text}] + [
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(p).decode()}}
+                for p in pics[0] + pics[1]]
+            try:
+                store[key] = server.ask(content, 150, schema=PAIR_SCHEMA, raw=True)
+            except Exception as error:  # noqa: BLE001
+                log(f"   ⚠️  Comparison skipped: {error}")
+                continue
+            store_file.write_text(json.dumps(store, ensure_ascii=False), encoding="utf-8")
+        if store[key].get("better") == "B":
+            a.score, b.score = b.score, a.score
+            top[i], top[i + 1] = b, a
+            swaps += 1
+    return swaps

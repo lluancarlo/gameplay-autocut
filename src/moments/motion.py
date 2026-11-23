@@ -102,3 +102,51 @@ def measure(stack: np.ndarray, fps: float, step: int = 8) -> Motion:
 def window(path, start: float, end: float, fps: float, aspect: float, cancel: video_io.Canceller) -> Motion:
     height = max(2, int(round(WIDTH / max(aspect, 0.1) / 2)) * 2)
     return measure(frames(path, start, end, fps, height, cancel), fps)
+
+
+def focus_track(path, start: float, end: float, aspect: float, cancel: video_io.Canceller,
+                fps: float = 4.0, smooth_s: float = 1.5) -> list[tuple[float, float]]:
+    """Where the action is, horizontally: [(seconds from start, x centre 0..1)], smoothed.
+
+    The weight of a pixel is its local motion (flow the camera does not explain),
+    HUD masked out, so the window follows the car or the fight rather than the
+    camera. Seconds with too little local motion keep the last position (or
+    the centre), and the path is smoothed so the crop glides instead of jitters.
+    """
+    import cv2
+
+    height = max(2, int(round(WIDTH / max(aspect, 0.1) / 2)) * 2)
+    stack = frames(path, start, end, fps, height, cancel)
+    if len(stack) < 2:
+        return [(0.0, 0.5)]
+    dis = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_ULTRAFAST)
+    moving = static_mask(stack).astype(np.float32)
+    h, w = stack.shape[1:]
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    columns = np.arange(w, dtype=np.float32)
+    raw: list[float | None] = [None]
+    for a, b in zip(stack[:-1], stack[1:]):
+        flow = dis.calc(a, b, None)
+        step = 8
+        src = np.stack([xs[::step, ::step].ravel(), ys[::step, ::step].ravel()], axis=1)
+        dst = src + flow[::step, ::step].reshape(-1, 2)
+        model, _ = cv2.estimateAffinePartial2D(src, dst, method=cv2.RANSAC, ransacReprojThreshold=1.5)
+        if model is None:
+            residual = np.linalg.norm(flow - np.median(flow.reshape(-1, 2), axis=0), axis=2)
+        else:
+            px = xs * model[0, 0] + ys * model[0, 1] + model[0, 2] - xs
+            py = xs * model[1, 0] + ys * model[1, 1] + model[1, 2] - ys
+            residual = np.hypot(flow[..., 0] - px, flow[..., 1] - py)
+        weight = (np.clip(residual - 1.0, 0, None) * moving).sum(axis=0)
+        raw.append(float((weight * columns).sum() / weight.sum() / w) if weight.sum() > 0.02 * h * w else None)
+    filled, last = [], 0.5
+    for value in raw:
+        last = value if value is not None else last
+        filled.append(last)
+    series = np.array(filled)
+    sigma = max(1.0, smooth_s * fps)
+    radius = int(3 * sigma)
+    kernel = np.exp(-0.5 * (np.arange(-radius, radius + 1) / sigma) ** 2)
+    padded = np.pad(series, radius, mode="edge")
+    smooth = np.convolve(padded, kernel / kernel.sum(), mode="valid")
+    return [(round(i / fps, 2), round(float(x), 4)) for i, x in enumerate(smooth)]

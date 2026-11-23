@@ -194,7 +194,8 @@ def plan(info: video_io.VideoInfo, settings: Settings) -> Layout:
     )
 
 
-def filtergraph(layout: Layout, settings: Settings) -> tuple[str, str]:
+def filtergraph(layout: Layout, settings: Settings, source: str = "0:v", out: str = "out",
+                tag: str = "") -> tuple[str, str]:
     """Build the filter_complex for `layout`. Returns (graph, output label).
 
     One decode feeds both branches through `split`. The background is the same
@@ -211,7 +212,7 @@ def filtergraph(layout: Layout, settings: Settings) -> tuple[str, str]:
     opacity = max(0.0, min(1.0, settings.opacity))
 
     background = (
-        f"[bg]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
+        f"[bg{tag}]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
         f"crop={canvas_w}:{canvas_h},"
         f"scale={small_w}:{small_h},"
         f"gblur=sigma={settings.blur_sigma:g},"
@@ -219,7 +220,7 @@ def filtergraph(layout: Layout, settings: Settings) -> tuple[str, str]:
         # A straight multiply toward black -- what Blanking Fill's background
         # opacity comes to over the timeline's black backdrop.
         f"colorlevels=romax={opacity:g}:gomax={opacity:g}:bomax={opacity:g}"
-        f"[backdrop]"
+        f"[backdrop{tag}]"
     )
 
     left, right, top, bottom = layout.crop
@@ -233,13 +234,13 @@ def filtergraph(layout: Layout, settings: Settings) -> tuple[str, str]:
     # than the canvas (or a zoom under 1) instead of failing; commas inside a
     # filter argument have to be escaped from the graph's own separator.
     steps.append(rf"crop=min({canvas_w}\,iw):min({canvas_h}\,ih)")
-    foreground = f"[fg]{','.join(steps)}[front]"
+    foreground = f"[fg{tag}]{','.join(steps)}[front{tag}]"
 
     sign = "+" if layout.offset_y >= 0 else "-"
     overlay = (
-        f"[backdrop][front]overlay=(W-w)/2:(H-h)/2{sign}{abs(layout.offset_y)}"
-        f",setsar=1[out]"
+        f"[backdrop{tag}][front{tag}]overlay=(W-w)/2:(H-h)/2{sign}{abs(layout.offset_y)}"
+        f",setsar=1[{out}]"
     )
 
-    graph = ";".join(["[0:v]split=2[bg][fg]", background, foreground, overlay])
-    return graph, "out"
+    graph = ";".join([f"[{source}]split=2[bg{tag}][fg{tag}]", background, foreground, overlay])
+    return graph, out

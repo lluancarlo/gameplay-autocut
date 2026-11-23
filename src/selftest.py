@@ -79,7 +79,7 @@ def run() -> int:
         from .moments import judge
         folder = judge._folder()
         exe = folder / "llama" / "llama-server.exe"
-        files = {name: (folder / name).is_file() for name in judge.MODEL["files"]}
+        files = {name: (folder / name).is_file() for name in judge.model_for(config.load("moments")["judge"])["files"]}
         if not exe.is_file():
             return {"runtime": "not downloaded yet (first AI review downloads it)", "model_files": files}
         out = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=60,

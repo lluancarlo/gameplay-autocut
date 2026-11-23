@@ -1,8 +1,9 @@
 {
-  "clip": {"min": 10, "ideal": 20, "max": 45, "setup": 5, "tail": 2, "extent": 0.5,
+  "clip": {"min": 10, "ideal": 22, "max": 35, "setup": 3, "tail": 2, "extent": 0.5,
            "onset": {"signals": ["action", "vision", "vehicle", "siren", "crash", "loudness"],
-                     "level": 0.3, "gap_s": 5, "lookback_s": 35, "pre_roll_s": 5}},
-  "_clip_note": "A clip opens where the action starts: from the peak, walk back through the run of seconds where any onset signal is >= level (pauses up to gap_s allowed, at most lookback_s), then pre_roll_s more. max is the longest a clip may become for that; the end is trimmed first. A clip never opens or closes on a menu/map/pause second.",
+                     "level": 0.3, "gap_s": 5, "lookback_s": 30, "pre_roll_s": 2},
+           "scene_cut": {"threshold": 0.8, "snap_s": 1.5}},
+  "_clip_note": "A clip opens where the action starts: from the peak, walk back through the run of seconds where any onset signal is >= level (pauses up to gap_s allowed, at most lookback_s), then pre_roll_s more. Shorts retain best at 15-35 s and the first 2-3 s decide whether people stay, so the lead-in is short (pre_roll_s) and max is 35. Bounds snap to a shot change within scene_cut.snap_s. max is the longest a clip may become; the end is trimmed first. A clip never opens or closes on a menu/map/pause second.",
   "peaks": {"min_gap": 20, "floor": 0.08, "full_score": 0.6},
   "smooth_sigma": 2.0,
   "agreement_bonus": 0.15,
@@ -31,10 +32,13 @@
             "commentary_min_s": 60, "no_voice_reaction": 0.5},
   "_voice_note": "Detected, never asked. Several audio tracks: the extra track with at least track_min_speech of speech is the microphone. One track: speech in a language other than game_language (GTA 6: English) is the player's; without language information, speech under a subtitle is the game's; if at least commentary_ratio of the speech (and commentary_min_s seconds) is not subtitled, the player is talking. With no player voice, the shout/laughter signal is scaled by no_voice_reaction (it is the game's).",
 
-  "judge": {"enabled": true, "game": "GTA 6", "minutes_per_review": 2.5, "min_reviews": 10, "max_reviews": 60,
-            "frames": 8, "frame_width": 512, "look_before_s": 10, "pre_roll_s": 3, "weight": 0.6,
+  "judge": {"enabled": true, "model": "4b", "game": "GTA 6", "minutes_per_review": 2.5, "min_reviews": 10, "max_reviews": 60,
+            "frames": 16, "frame_width": 448, "look_before_s": 10, "pre_roll_s": 1.5, "weight": 0.6, "rerank_top": 8,
             "context": 16384, "max_tokens": 400},
-  "_judge_note": "AI review (offline, llama.cpp + Qwen3-VL-4B). One review per minutes_per_review of recording (between min and max), strongest candidates first; can be stopped early. weight: share of the final score from the AI's 0-10 (x10); the rest is the detectors' score. The clip may start earlier, where the AI says the action begins, minus pre_roll_s.",
+  "_judge_note": "AI review (offline, llama.cpp + Qwen3-VL-4B). One review per minutes_per_review of recording (between min and max), strongest candidates first; can be stopped early. weight: share of the final score from the AI's 0-10 (x10); the rest is the detectors' score. The clip may start earlier, where the AI says the action begins, minus pre_roll_s. frames: 16 pictures per clip, to place the start. rerank_top: the best N are then compared two by two (steadier than absolute scores). model: \"4b\" (default) or \"8b\"; on the 2-hour stream the 8B wrote more natural Portuguese but ranked the known best moments lower, copied a title example and needs +5.8 GB, so 4B stays.",
+
+  "markers": {"lookback_s": 30, "default_s": 20, "min_score": 50},
+  "_markers_note": "Say \"clipar agora\" while playing: the clip ends just before the phrase and starts where the action did (up to lookback_s before; default_s when nothing stands out). It always survives overlaps and is always reviewed by the AI; min_score keeps it visible before the review.",
 
   "sound_groups": {
     "reaction": ["Shout", "Bellow", "Whoop", "Yell", "Battle cry", "Screaming", "Laughter", "Giggle", "Belly laugh",

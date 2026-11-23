@@ -16,7 +16,7 @@ from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPainter, QPen, QPixm
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+    QCheckBox, QComboBox, QDialog, QDialogButtonBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
     QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton,
     QSizePolicy, QSlider, QSpinBox, QSplitter, QVBoxLayout, QWidget,
 )
@@ -56,6 +56,10 @@ def _primary(text: str) -> QPushButton:
     return button
 
 
+def _flag(value) -> bool:
+    return str(value).strip().lower() in ("true", "1", "yes")
+
+
 def _plain(text: str) -> str:
     """Without emoji: on a card, Qt measures the line without the emoji font and elides what follows."""
     return " ".join("".join(c for c in text if ord(c) < 0x2600 and c not in "️‍").split())
@@ -93,6 +97,10 @@ class Prefs:
             ("opacity", "short/opacity", framing.opacity, float), ("blur", "short/blur", framing.blur_sigma, float),
         ):
             self.register(f"framing/{key}", value, cast, legacy)
+        self.register("framing/mode", "bars")
+        self.register("shorts/teaser", False, _flag)
+        self.register("shorts/captions", True, _flag)
+        self.register("shorts/trim", True, _flag)
 
     def register(self, key: str, default, cast=str, legacy: str | None = None) -> None:
         self.defaults[key] = default
@@ -775,6 +783,8 @@ class PickStep(Step):
         kind = moment.label.upper() + (f" · {moment.label2}" if moment.label2 else "")
         if moment.ai:
             kind = f"AI {moment.ai['score']}/10 · {_plain(moment.ai['title'])[:34]}"
+        if moment.marked is not None:
+            kind = "MARKED · " + kind
         item.setText(f"#{index + 1} · score {moment.score}\n{kind}\n{clock(start)} · {end - start:.0f}s")
 
     def _filter(self) -> None:
@@ -832,6 +842,8 @@ class PickStep(Step):
         if moment.ai:
             text = (f"<b>{ICONS.get(moment.label, '')} {moment.ai['title']}</b> — AI {moment.ai['score']}/10<br>"
                     f"{moment.ai['description']}<br><span style='color:#8d8d8d'>{moment.explanation}</span>")
+        if moment.marked is not None:
+            text = f"📌 <b>You said \"clipar agora\" at {clock(moment.marked)}</b><br>" + text
         self.why_label.setText(text)
         item = self.cards.currentItem()
         if item is not None:
@@ -911,11 +923,18 @@ class FramingDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Adjust framing")
         self.prefs = prefs
-        self._before = {k: prefs.get(k) for k in ("framing/zoom", "framing/offset_y", "framing/opacity", "framing/blur")}
+        self._before = {k: prefs.get(k) for k in ("framing/zoom", "framing/offset_y", "framing/opacity", "framing/blur",
+                                                  "framing/mode")}
         form = QFormLayout(self)
         intro = QLabel("The preview in the main window follows every change.")
         intro.setStyleSheet("color: palette(mid);")
         form.addRow(intro)
+        self.mode = QComboBox()
+        self.mode.addItem("Blurred bars — the whole picture, centred", "bars")
+        self.mode.addItem("Follow the action — full height, the crop glides to what moves", "follow")
+        self.mode.setCurrentIndex(max(0, self.mode.findData(prefs.get("framing/mode"))))
+        self.mode.currentIndexChanged.connect(self._apply)
+        form.addRow("Mode", self.mode)
         self.zoom = ZoomBar(low=0.05, high=2.0, value=prefs.get("framing/zoom"), step=0.05)
         self.zoom.setToolTip("1.0 fills the portrait frame and crops the sides; 0.5 leaves a blurred bar above and below.")
         form.addRow("Zoom", self.zoom)
@@ -949,6 +968,10 @@ class FramingDialog(QDialog):
         self.setMinimumWidth(420)
 
     def _apply(self, *_ignored) -> None:
+        self.prefs.set("framing/mode", self.mode.currentData())
+        bars = self.mode.currentData() == "bars"
+        for widget in (self.zoom, self.offset, self.opacity, self.blur):
+            widget.setEnabled(bars)
         self.prefs.set("framing/zoom", self.zoom.value())
         self.prefs.set("framing/offset_y", self.offset.value())
         self.prefs.set("framing/opacity", round(self.opacity.value(), 2))
@@ -962,6 +985,7 @@ class FramingDialog(QDialog):
             widget.blockSignals(True)
             widget.setValue(value)
             widget.blockSignals(False)
+        self.mode.setCurrentIndex(0)
         self._apply()
 
     def reject(self) -> None:
@@ -1014,6 +1038,24 @@ class ShortsStep(Step):
         self.adjust_button = QPushButton("Adjust framing...")
         self.adjust_button.clicked.connect(self._adjust)
         left.addWidget(self.adjust_button)
+        self.teaser_box = QCheckBox("Teaser: open with 1.5 s of the best moment")
+        self.teaser_box.setToolTip("The first 2-3 seconds decide whether people keep watching: show the payoff "
+                                   "first, then the clip from its start.")
+        self.teaser_box.setChecked(bool(prefs.get("shorts/teaser")))
+        self.teaser_box.toggled.connect(lambda on: prefs.set("shorts/teaser", on))
+        left.addWidget(self.teaser_box)
+        self.captions_box = QCheckBox("Captions: your voice + the game's dialogue")
+        self.captions_box.setToolTip("Your words big at the bottom, the one being said in yellow; the game's "
+                                     "subtitles readable at the top.")
+        self.captions_box.setChecked(bool(prefs.get("shorts/captions")))
+        self.captions_box.toggled.connect(lambda on: prefs.set("shorts/captions", on))
+        left.addWidget(self.captions_box)
+        self.trim_box = QCheckBox("Cut dead seconds inside the clip")
+        self.trim_box.setToolTip("Quiet stretches of 3 s or more with nothing happening and nobody talking become "
+                                 "jump cuts. The peak and the first and last seconds are never cut.")
+        self.trim_box.setChecked(bool(prefs.get("shorts/trim")))
+        self.trim_box.toggled.connect(lambda on: prefs.set("shorts/trim", on))
+        left.addWidget(self.trim_box)
         left.addStretch(1)
         layout.addLayout(left)
 
@@ -1094,9 +1136,15 @@ class ShortsStep(Step):
         self.new_button.setVisible(mode == "done")
         self.back_button.setEnabled(mode != "rendering")
         self.adjust_button.setEnabled(mode == "ready")
+        self.teaser_box.setEnabled(mode == "ready")
+        self.captions_box.setEnabled(mode == "ready")
+        self.trim_box.setEnabled(mode == "ready")
         self.dest_edit.setEnabled(mode == "ready")
 
     def _show_framing(self) -> None:
+        if self.prefs.get("framing/mode") == "follow":
+            self.framing_label.setText("follow the action · full height, no bars")
+            return
         self.framing_label.setText(
             f"zoom {self.prefs.get('framing/zoom'):g} · position {self.prefs.get('framing/offset_y')} px · "
             f"background {self.prefs.get('framing/opacity'):.0%} · blur {self.prefs.get('framing/blur'):g}")
@@ -1123,9 +1171,10 @@ class ShortsStep(Step):
             return
         cancel = video_io.Canceller()
         self.preview.setText("Rendering preview…")
+        mode = self.prefs.get("framing/mode")
 
         def job(_log, _progress):
-            return pipeline.preview_clip(source, peak, dest, settings=settings, cancel=cancel)
+            return pipeline.preview_clip(source, peak, dest, settings=settings, mode=mode, cancel=cancel)
 
         self.preview_runner.start(job, cancel, self._preview_ready, self._preview_failed)
 
@@ -1166,7 +1215,14 @@ class ShortsStep(Step):
     def _generate(self) -> None:
         if self.analysis is None:
             return
-        source, clips, dest = self.analysis.path, [(c[0], c[1]) for c in self.clips], self._dest()
+        source, dest = self.analysis.path, self._dest()
+        items = [{"start": c[0], "end": c[1], "peak": c[2], "best_at": (c[4] or {}).get("best_at")}
+                 for c in self.clips]
+        words, subtitles = self.analysis.player_words, self.analysis.subtitles
+        mode, teaser, burn = self.prefs.get("framing/mode"), self.teaser_box.isChecked(), self.captions_box.isChecked()
+        trim, curve = self.trim_box.isChecked(), self.analysis.curve
+        voice_info = self.analysis.voice or {}
+        voice_track = voice_info.get("track") if voice_info.get("mode") == "track" else None
         self.prefs.set("app/dest", str(dest))
         try:
             settings = Framing.from_prefs(self.prefs)
@@ -1179,8 +1235,10 @@ class ShortsStep(Step):
         self._set_mode("rendering")
 
         def job(log, progress):
-            return pipeline.clip_shorts(source, clips, dest, settings=settings, log=log, progress=progress,
-                                        cancel=cancel)
+            return pipeline.make_shorts(source, items, dest, settings=settings, mode=mode, teaser=teaser,
+                                        captions=burn, words=words, subtitles=subtitles, trim=trim,
+                                        curve=curve, voice_track=voice_track, log=log,
+                                        progress=progress, cancel=cancel)
 
         self.render_runner.start(job, cancel, self._rendered, self._render_failed, self._render_cancelled)
 
