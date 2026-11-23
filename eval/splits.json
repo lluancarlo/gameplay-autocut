@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "_doc": "Which split each recording belongs to. Assigned once, never moved. Paths are relative to the repo root (or absolute); the videos themselves are never committed. See docs/ai-highlights/DATASET_RESEARCH.md section 4.2.",
+  "recordings": {
+    "gta6-sample-01": {
+      "path": "GTA-6.mp4",
+      "game": "gta6",
+      "split": "tune",
+      "note": "Pre-cut GTA VI session, 15:32, single audio track (game audio only, no player mic). Example recording until the P1 footage (The Finals) exists."
+    }
+  }
+}

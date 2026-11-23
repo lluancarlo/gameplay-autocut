@@ -1,0 +1,175 @@
+{
+ "recording": "gta6-sample-01",
+ "created": "2026-11-23T02:05:34",
+ "commit": "fc9a896+dirty",
+ "language": "en",
+ "moments": [
+  {
+   "start": 446.9,
+   "end": 466.9,
+   "peak": 459.0,
+   "score": 49,
+   "reasons": [
+    "\"what the\"",
+    "\"fuck\"",
+    "fast speech"
+   ]
+  },
+  {
+   "start": 259.1,
+   "end": 279.1,
+   "peak": 271.0,
+   "score": 41,
+   "reasons": [
+    "\"bro\"",
+    "\"lets go\"",
+    "fast speech"
+   ]
+  },
+  {
+   "start": 486.5,
+   "end": 506.5,
+   "peak": 497.0,
+   "score": 40,
+   "reasons": [
+    "loud",
+    "fast speech"
+   ]
+  },
+  {
+   "start": 338.8,
+   "end": 358.8,
+   "peak": 351.0,
+   "score": 37,
+   "reasons": [
+    "\"what the\"",
+    "\"shit\"",
+    "fast speech"
+   ]
+  },
+  {
+   "start": 549.8,
+   "end": 570.0,
+   "peak": 562.0,
+   "score": 36,
+   "reasons": [
+    "fast speech",
+    "loud"
+   ]
+  },
+  {
+   "start": 896.8,
+   "end": 916.8,
+   "peak": 909.0,
+   "score": 34,
+   "reasons": [
+    "loud"
+   ]
+  },
+  {
+   "start": 0.0,
+   "end": 10.1,
+   "peak": 3.0,
+   "score": 31,
+   "reasons": [
+    "loud"
+   ]
+  },
+  {
+   "start": 166,
+   "end": 188.08,
+   "peak": 182.0,
+   "score": 26,
+   "reasons": [
+    "fast speech"
+   ]
+  },
+  {
+   "start": 426.45,
+   "end": 446.6,
+   "peak": 436.0,
+   "score": 26,
+   "reasons": [
+    "loud",
+    "fast speech"
+   ]
+  },
+  {
+   "start": 756.1,
+   "end": 776.1,
+   "peak": 769.0,
+   "score": 26,
+   "reasons": [
+    "fast speech",
+    "loud"
+   ]
+  },
+  {
+   "start": 99.8,
+   "end": 119.84,
+   "peak": 112.0,
+   "score": 25,
+   "reasons": [
+    "fast speech",
+    "\"fucking\""
+   ]
+  },
+  {
+   "start": 368.56,
+   "end": 388.8,
+   "peak": 381.0,
+   "score": 25,
+   "reasons": [
+    "fast speech"
+   ]
+  },
+  {
+   "start": 623.8,
+   "end": 643.8,
+   "peak": 637.0,
+   "score": 22,
+   "reasons": [
+    "\"shit\"",
+    "\"fucking\"",
+    "fast speech"
+   ]
+  },
+  {
+   "start": 202.4,
+   "end": 222.4,
+   "peak": 215.0,
+   "score": 20,
+   "reasons": [
+    "\"come on\""
+   ]
+  },
+  {
+   "start": 296,
+   "end": 318,
+   "peak": 305.0,
+   "score": 20,
+   "reasons": [
+    "fast speech",
+    "\"fuck\""
+   ]
+  },
+  {
+   "start": 572.9,
+   "end": 592.9,
+   "peak": 582.0,
+   "score": 18,
+   "reasons": [
+    "fast speech"
+   ]
+  },
+  {
+   "start": 874.12,
+   "end": 894.5,
+   "peak": 887.0,
+   "score": 14,
+   "reasons": [
+    "fast speech"
+   ]
+  }
+ ]
+}

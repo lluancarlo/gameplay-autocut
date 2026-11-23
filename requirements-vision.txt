@@ -1,0 +1,5 @@
+# Vision (SigLIP 2, milestone M2): ONNX Runtime with DirectML -- any DirectX 12 GPU
+# (NVIDIA, AMD, Intel), no CUDA libraries to download. Install AFTER requirements.txt
+# and after `pip uninstall -y onnxruntime` (see the top of requirements.txt).
+# Pinned: 1.24.4 is the build measured and validated (docs/ai-highlights/CHANGELOG.md).
+onnxruntime-directml==1.24.4

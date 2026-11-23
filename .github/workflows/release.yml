@@ -1,4 +1,4 @@
-# Builds VVideo.exe on Windows and publishes it as a release zip.
+# Builds GameplayAutoCut.exe on Windows and publishes it as a release zip.
 #
 #   push to master                              -> rolling `latest` prerelease
 #   git tag v1.0.0 && git push origin v1.0.0    -> permanent release for the tag
@@ -44,25 +44,28 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip uninstall -y onnxruntime
+          pip install -r requirements-vision.txt
+          pip install --no-deps -r requirements-ocr.txt
+          python -c "import onnxruntime as o; assert 'DmlExecutionProvider' in o.get_available_providers(), o.get_available_providers()"
 
-      - name: Build VVideo.exe
-        run: pyinstaller VVideo.spec --noconfirm --clean
+      - name: Build GameplayAutoCut.exe
+        run: pyinstaller GameplayAutoCut.spec --noconfirm --clean
 
-      # The zip holds exactly one file, VVideo.exe at its root -- nothing to
-      # unpack into a folder, nothing to find.
+      # The zip holds the publish folder: GameplayAutoCut.exe and its libraries.
       - name: Package
         shell: pwsh
         run: |
-          if (-not (Test-Path dist/VVideo.exe)) { throw "dist/VVideo.exe was not built" }
+          if (-not (Test-Path publish/GameplayAutoCut.exe)) { throw "publish/GameplayAutoCut.exe was not built" }
           New-Item -ItemType Directory -Force release | Out-Null
-          Compress-Archive -Path dist/VVideo.exe -DestinationPath release/VVideo.zip -CompressionLevel Optimal
+          Compress-Archive -Path publish/* -DestinationPath release/GameplayAutoCut.zip -CompressionLevel Optimal
 
       # Both hashes: the zip is what gets downloaded, the .exe is what actually
       # runs, and a user who has already extracted it can only check the second.
       - name: Checksums
         shell: pwsh
         run: |
-          $lines = foreach ($f in @('release/VVideo.zip', 'dist/VVideo.exe')) {
+          $lines = foreach ($f in @('release/GameplayAutoCut.zip', 'publish/GameplayAutoCut.exe')) {
             $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
             "$h  $(Split-Path $f -Leaf)"
           }
@@ -74,15 +77,15 @@ jobs:
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: release/VVideo.zip
+          subject-path: release/GameplayAutoCut.zip
 
       # Kept for workflow_dispatch runs, which publish nothing.
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VVideo-${{ github.sha }}
+          name: GameplayAutoCut-${{ github.sha }}
           path: |
-            release/VVideo.zip
+            release/GameplayAutoCut.zip
             release/SHA256SUMS.txt
 
       # Two kinds of release off one build. A tag gets a permanent release
@@ -98,11 +101,11 @@ jobs:
           $isTag = '${{ github.ref_type }}' -eq 'tag'
           if ($isTag) {
             $tag = '${{ github.ref_name }}'
-            $title = "VVideo $tag"
+            $title = "Gameplay AutoCut $tag"
             $extra = @()
           } else {
             $tag = 'latest'
-            $title = 'VVideo latest (master)'
+            $title = 'Gameplay AutoCut latest (master)'
             $extra = @('--prerelease')
           }
 
@@ -112,8 +115,8 @@ jobs:
           $notes = $notes.Replace('__VERSION__', $tag)
           $notes = $notes.Replace('__COMMIT__', '${{ github.sha }}')
           $notes = $notes.Replace('__REPO__', '${{ github.repository }}')
-          $notes = $notes.Replace('__ZIP_HASH__', (Get-FileHash release/VVideo.zip -Algorithm SHA256).Hash.ToLower())
-          $notes = $notes.Replace('__EXE_HASH__', (Get-FileHash dist/VVideo.exe -Algorithm SHA256).Hash.ToLower())
+          $notes = $notes.Replace('__ZIP_HASH__', (Get-FileHash release/GameplayAutoCut.zip -Algorithm SHA256).Hash.ToLower())
+          $notes = $notes.Replace('__EXE_HASH__', (Get-FileHash publish/GameplayAutoCut.exe -Algorithm SHA256).Hash.ToLower())
           Set-Content -Path release/notes.md -Value $notes -Encoding utf8
 
           # Nothing updates a release in place with new assets, so the rolling
@@ -125,7 +128,7 @@ jobs:
           }
 
           gh release create $tag `
-            release/VVideo.zip release/SHA256SUMS.txt `
+            release/GameplayAutoCut.zip release/SHA256SUMS.txt `
             --target ${{ github.sha }} `
             --title $title `
             --notes-file release/notes.md `

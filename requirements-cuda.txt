@@ -1,0 +1,5 @@
+# Optional: Whisper on an NVIDIA GPU when running from source (~1.3 GB).
+# The .exe downloads the same libraries into GameplayAutoCut-data\cuda on first use.
+#   pip install -r requirements-cuda.txt
+nvidia-cublas-cu12
+nvidia-cudnn-cu12>=9,<10

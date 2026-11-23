@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "recording": "gta6-sample-01",
+  "status": "draft",
+  "annotator": "claude-draft",
+  "method": "Contact sheets at one frame every 5 s plus the Whisper transcript. The audio was NOT listened to and nothing was watched in motion, so bounds are +-5 s and ratings are provisional. A human must review this file and set status to 'reviewed' before it counts.",
+  "duration": 931.81,
+  "reviewed_spans": [[0, 931.81]],
+  "non_gameplay": [
+    [8, 13],
+    [58, 67],
+    [143, 148],
+    [287, 298],
+    [513, 528],
+    [533, 547],
+    [763, 768],
+    [823, 838],
+    [893, 903],
+    [908, 931.81]
+  ],
+  "moments": [
+    {"start": 70, "end": 82, "rating": 1, "label": "vehicle", "note": "possible collision with a pole near the traffic light, ~01:12 -- verify"},
+    {"start": 166, "end": 176, "rating": 1, "label": "vehicle", "note": "car sliding sideways with dust, ~02:50 -- verify"},
+    {"start": 220, "end": 250, "rating": 3, "label": "unusual", "label2": "stunt", "note": "NPCs dare them; jump off the bridge into the river (~03:55-04:05)"},
+    {"start": 250, "end": 278, "rating": 2, "label": "reaction", "label2": "funny", "note": "'It's just a prank, bro!' after the jump"},
+    {"start": 328, "end": 352, "rating": 1, "label": "reaction", "note": "argument at the camp entrance"},
+    {"start": 375, "end": 390, "rating": 1, "label": "reaction", "note": "'Shut your ass up. You a fraud.'"},
+    {"start": 425, "end": 440, "rating": 1, "label": "reaction", "label2": "funny", "note": "comic dialogue with the naturist NPCs"},
+    {"start": 455, "end": 478, "rating": 2, "label": "reaction", "note": "confrontation with bloodied naked NPCs ('slap contest')"},
+    {"start": 488, "end": 510, "rating": 1, "label": "reaction", "label2": "funny", "note": "electrolytes joke"},
+    {"start": 622, "end": 660, "rating": 2, "label": "unusual", "note": "meditation minigame with psychedelic colour effect"},
+    {"start": 688, "end": 708, "rating": 2, "label": "reaction", "label2": "funny", "note": "'organ trafficker' joke during meditation"}
+  ]
+}

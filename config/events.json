@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "_note": "What the vision model is asked about. Each concept is a few phrasings; their text embeddings are averaged (prompt ensembling). Edit here, then rebuild config/events.npz with `python tools/build_prompt_bank.py` -- the app refuses a bank built from a different events.json or for a different image model. Prompts are lowercased before tokenising, as SigLIP 2 was trained. 'suppress' concepts mark non-gameplay; 'neutral' ones are the ordinary-gameplay baseline that event scores are compared with.",
+  "concepts": {
+    "non_gameplay": {
+      "kind": "suppress",
+      "prompts": [
+        "a video game menu screen with text",
+        "a video game map screen",
+        "a pause menu over a blurred game",
+        "a loading screen of a video game",
+        "a settings menu",
+        "a weapon selection wheel in a video game"
+      ]
+    },
+    "ordinary": {
+      "kind": "neutral",
+      "prompts": [
+        "a video game character walking",
+        "ordinary gameplay footage",
+        "a third-person view of a person walking outdoors"
+      ]
+    },
+    "combat": {
+      "kind": "event",
+      "prompts": [
+        "a gunfight in a video game",
+        "a first-person shooter with muzzle flash",
+        "soldiers shooting at each other"
+      ]
+    },
+    "explosion": {
+      "kind": "event",
+      "prompts": [
+        "a big explosion with fire and smoke",
+        "an explosion in a video game"
+      ]
+    },
+    "vehicle": {
+      "kind": "event",
+      "prompts": [
+        "a car chase in a video game",
+        "a car driving fast on a road",
+        "a third-person view of a car driving"
+      ]
+    },
+    "police": {
+      "kind": "event",
+      "prompts": [
+        "police cars chasing a car",
+        "a police car with flashing lights"
+      ]
+    },
+    "destruction": {
+      "kind": "event",
+      "prompts": [
+        "a building collapsing",
+        "debris flying everywhere",
+        "a wrecked car after a crash"
+      ]
+    },
+    "water": {
+      "kind": "event",
+      "prompts": [
+        "a person jumping into water",
+        "a person swimming in a river"
+      ]
+    },
+    "crash": {
+      "kind": "event",
+      "prompts": [
+        "a car flipping over after a crash",
+        "a car crash on the road",
+        "an overturned car lying on its roof"
+      ]
+    },
+    "fire": {
+      "kind": "event",
+      "prompts": [
+        "a car on fire",
+        "a burning vehicle with flames and smoke"
+      ]
+    },
+    "helicopter": {
+      "kind": "event",
+      "prompts": [
+        "a police helicopter in the sky",
+        "a helicopter flying low over a city"
+      ]
+    },
+    "arrest": {
+      "kind": "event",
+      "prompts": [
+        "police officers arresting a person",
+        "a person with hands up surrounded by police officers"
+      ]
+    },
+    "motorcycle": {
+      "kind": "event",
+      "prompts": [
+        "a motorcycle jumping in the air",
+        "a motorcycle doing a wheelie"
+      ]
+    },
+    "collapse": {
+      "kind": "event",
+      "prompts": [
+        "a building collapsing in a video game",
+        "a wall exploding into debris"
+      ]
+    }
+  }
+}
