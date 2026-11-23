@@ -8,6 +8,7 @@ end owns the pipeline.
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -312,3 +313,106 @@ def preview_short(
     )
     log(f"      ✅ {dest.name}")
     return dest
+
+
+def clip_shorts(
+    source: Path,
+    clips: list[tuple[float, float]],
+    dest_dir: Path,
+    *,
+    settings: shorts.Settings | None = None,
+    log: Log = _ignore,
+    progress: Progress = _ignore,
+    cancel: video_io.Canceller | None = None,
+) -> list[Path]:
+    """Cut each (start, end) out of `source` and reframe it as a vertical short, in one encode.
+
+    Re-encoding anyway means the cut is exact -- no keyframe snapping -- and the
+    bar is shared out by clip length, so a 30 s clip takes three times the 10 s one.
+    """
+    cancel = cancel or video_io.Canceller()
+    settings = settings or shorts.Settings.load()
+    info = video_io.probe(source)
+    layout = shorts.plan(info, settings)
+    graph, label = shorts.filtergraph(layout, settings)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    total = sum(end - start for start, end in clips) or 1.0
+    span = Span(progress)
+    done = 0.0
+    written = []
+    log(f"🎬 {_count(len(clips), 'short')} from {source.name} · {layout.canvas_w}×{layout.canvas_h}")
+    for index, (start, end) in enumerate(clips, start=1):
+        cancel.check()
+        length = end - start
+        share = span.slice(done / total, (done + length) / total)
+        dest = dest_dir / moment_name(source, start)
+        if dest.resolve() == source.resolve():
+            raise RuntimeError(f"Output would overwrite the source: {dest}")
+        log(f"   🎞️  {index}/{len(clips)} · {clock(start)} → {clock(end)} ({length:.0f}s)")
+        video_io.render(source, dest, graph, out_label=label, start=start, duration=length,
+                        total=length, progress=share.counting(), cancel=cancel)
+        share.done()
+        done += length
+        written.append(dest)
+        log(f"      ✅ {dest.name}")
+    span.done()
+    return written
+
+
+def preview_clip(
+    source: Path,
+    at: float,
+    dest: Path,
+    *,
+    settings: shorts.Settings | None = None,
+    cancel: video_io.Canceller | None = None,
+) -> Path:
+    """One frame of `source` at `at` seconds, composited exactly as the short will be."""
+    settings = settings or shorts.Settings.load()
+    layout = shorts.plan(video_io.probe(source), settings)
+    graph, label = shorts.filtergraph(layout, settings)
+    return video_io.render_still(source, dest, graph, at, out_label=label, cancel=cancel)
+
+
+def clock(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds >= 3600:
+        return f"{seconds // 3600}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def keyframe_before(keyframes: list[float], seconds: float) -> float:
+    """Where a copy that should start at `seconds` really starts."""
+    index = bisect.bisect_right(keyframes, seconds + 1e-3) - 1
+    return keyframes[index] if index >= 0 else 0.0
+
+
+def moment_name(source: Path, start: float) -> str:
+    seconds = int(start)
+    return f"{source.stem}_{seconds // 60:02d}m{seconds % 60:02d}s.mp4"
+
+
+def cut_moments(
+    source: Path,
+    ranges: list[tuple[float, float]],
+    keyframes: list[float],
+    dest_dir: Path,
+    *,
+    log: Log = _ignore,
+    progress: Progress = _ignore,
+    cancel: video_io.Canceller | None = None,
+) -> list[Path]:
+    """Copy each (start, end) out of `source` as an .mp4, starting at the keyframe before it."""
+    cancel = cancel or video_io.Canceller()
+    span = Span(progress)
+    log(f"✂️  {_count(len(ranges), 'moment')} from {source.name}")
+    written = []
+    for index, (start, end) in enumerate(ranges, start=1):
+        cancel.check()
+        dest = dest_dir / moment_name(source, start)
+        video_io.cut(source, dest, keyframe_before(keyframes, start), end, cancel)
+        written.append(dest)
+        log(f"   ✅ {dest.name}")
+        span.at(index / len(ranges))
+    return written

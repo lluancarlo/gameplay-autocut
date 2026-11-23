@@ -22,8 +22,16 @@ def _root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
+def _data_root() -> Path:
+    """VVideo-data/ beside the .exe (or the project), so deleting the folder removes everything."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent / "VVideo-data"
+    return Path(__file__).resolve().parent.parent / "VVideo-data"
+
+
 ROOT = _root()
 CONFIG_DIR = ROOT / "config"
+DATA_DIR = _data_root()
 
 
 @lru_cache(maxsize=None)

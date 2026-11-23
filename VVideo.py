@@ -1,7 +1,7 @@
 """VVideo -- the window. Also the entry point PyInstaller freezes into the .exe.
 
     python VVideo.py          # run from source
-    pyinstaller VVideo.spec   # build dist/VVideo.exe
+    pyinstaller VVideo.spec   # build publish/VVideo.exe
 
 One page over the shorts pipeline: a landscape highlight becomes a 1080x1920
 portrait video. The same job is available as a CLI -- see make-short.py.

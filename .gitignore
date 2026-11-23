@@ -3,11 +3,14 @@
 __pycache__/
 *.pyc
 
-# PyInstaller: build/ is intermediate, dist/ holds an exe that is rebuilt from
+# PyInstaller: build/ is intermediate, publish/ holds the app that is rebuilt from
 # VVideo.spec in one command. Neither belongs in the history.
 build/
-dist/
+publish/
 *.manifest
+
+# Downloaded models and analysis caches.
+VVideo-data/
 
 # Output. Everything the job writes, plus the window's default target.
 export/
@@ -35,3 +38,6 @@ out/
 # Portable settings file the window writes beside the .exe, and only when a
 # setting differs from its default. Machine-specific, never the project's.
 VVideo.ini
+
+# Ad-hoc evaluation runs. eval/baseline/ is committed, runs are not.
+eval/runs/

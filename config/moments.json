@@ -1,0 +1,38 @@
+{
+  "clip": {"min": 10, "ideal": 20, "max": 30, "setup": 5, "tail": 2, "extent": 0.5},
+  "peaks": {"min_gap": 20, "floor": 0.08, "full_score": 0.6},
+  "smooth_sigma": 2.0,
+  "agreement_bonus": 0.15,
+
+  "weights": {"loudness": 0.30, "reaction": 0.30, "action": 0.20, "speech": 0.20, "keywords": 0.25},
+  "loudness": {"baseline_s": 60, "floor_db": 3, "span_db": 9},
+  "reaction": {"full": 0.45},
+  "action": {"baseline_s": 60, "span": 0.4},
+  "speech": {"baseline_s": 60, "span": 2.5, "burst_rate": 3.0},
+
+  "keywords": {
+    "en": {
+      "no way": 1.0, "oh my god": 1.0, "lets go": 1.0, "holy shit": 1.0, "oh shit": 0.9,
+      "are you kidding": 0.9, "did you see that": 0.9, "unbelievable": 0.9, "clutch": 0.9,
+      "team wipe": 0.9, "what the": 0.8, "insane": 0.8, "oh no": 0.8, "no no no": 0.8,
+      "get rekt": 0.8, "headshot": 0.7, "wow": 0.7, "holy": 0.6, "crazy": 0.6, "come on": 0.6,
+      "wipe": 0.6, "ace": 0.6, "fuck": 0.6, "fucking": 0.5, "gg": 0.5, "nice": 0.4, "yes": 0.4,
+      "shit": 0.4, "dude": 0.35, "bro": 0.3
+    },
+    "it": {
+      "non ci credo": 1.0, "oh mio dio": 1.0, "porco dio": 1.0, "non è possibile": 0.9,
+      "dio cane": 0.9, "che cazzo": 0.9, "ti rendi conto": 0.8, "ma veramente": 0.7,
+      "ho ucciso": 0.7, "è incredibile": 0.9, "oddio": 0.9, "mamma mia": 0.9, "porca miseria": 0.9,
+      "andiamo": 0.9, "incredibile": 0.9, "pazzesco": 0.9, "ma dai": 0.8, "madonna": 0.8,
+      "assurdo": 0.8, "minchia": 0.8, "dai dai": 0.8, "no no no": 0.8, "cazzo": 0.7,
+      "che cosa": 0.6, "ma come": 0.6, "porca": 0.5, "dai": 0.5, "vai": 0.5, "grande": 0.5,
+      "bravo": 0.5
+    },
+    "pt": {
+      "não acredito": 1.0, "meu deus": 1.0, "puta que pariu": 1.0, "caraca": 0.9, "olha isso": 0.8,
+      "que isso": 0.8, "ai sim": 0.8, "absurdo": 0.8, "insano": 0.8, "socorro": 0.8, "caralho": 0.8,
+      "não não não": 0.8, "vai vai": 0.7, "bora": 0.7, "toma": 0.7, "porra": 0.7, "nossa": 0.6,
+      "vamo": 0.6, "partiu": 0.5, "mano": 0.35, "cara": 0.3
+    }
+  }
+}

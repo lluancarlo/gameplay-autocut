@@ -48,21 +48,20 @@ jobs:
       - name: Build VVideo.exe
         run: pyinstaller VVideo.spec --noconfirm --clean
 
-      # The zip holds exactly one file, VVideo.exe at its root -- nothing to
-      # unpack into a folder, nothing to find.
+      # The zip holds the publish folder: VVideo.exe and its libraries.
       - name: Package
         shell: pwsh
         run: |
-          if (-not (Test-Path dist/VVideo.exe)) { throw "dist/VVideo.exe was not built" }
+          if (-not (Test-Path publish/VVideo.exe)) { throw "publish/VVideo.exe was not built" }
           New-Item -ItemType Directory -Force release | Out-Null
-          Compress-Archive -Path dist/VVideo.exe -DestinationPath release/VVideo.zip -CompressionLevel Optimal
+          Compress-Archive -Path publish/* -DestinationPath release/VVideo.zip -CompressionLevel Optimal
 
       # Both hashes: the zip is what gets downloaded, the .exe is what actually
       # runs, and a user who has already extracted it can only check the second.
       - name: Checksums
         shell: pwsh
         run: |
-          $lines = foreach ($f in @('release/VVideo.zip', 'dist/VVideo.exe')) {
+          $lines = foreach ($f in @('release/VVideo.zip', 'publish/VVideo.exe')) {
             $h = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
             "$h  $(Split-Path $f -Leaf)"
           }
@@ -113,7 +112,7 @@ jobs:
           $notes = $notes.Replace('__COMMIT__', '${{ github.sha }}')
           $notes = $notes.Replace('__REPO__', '${{ github.repository }}')
           $notes = $notes.Replace('__ZIP_HASH__', (Get-FileHash release/VVideo.zip -Algorithm SHA256).Hash.ToLower())
-          $notes = $notes.Replace('__EXE_HASH__', (Get-FileHash dist/VVideo.exe -Algorithm SHA256).Hash.ToLower())
+          $notes = $notes.Replace('__EXE_HASH__', (Get-FileHash publish/VVideo.exe -Algorithm SHA256).Hash.ToLower())
           Set-Content -Path release/notes.md -Value $notes -Encoding utf8
 
           # Nothing updates a release in place with new assets, so the rolling

@@ -1,4 +1,4 @@
-**VVideo __VERSION__** — download `VVideo.zip` and extract `VVideo.exe`. No installer, no Python, no ffmpeg.
+**VVideo __VERSION__** — download `VVideo.zip`, extract it to a folder and run `VVideo.exe`. No installer, no Python, no ffmpeg. The Moments tab downloads its AI models into `VVideo-data` beside it on first use.
 
 ### Verify before you run it
 

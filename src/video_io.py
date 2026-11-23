@@ -7,6 +7,7 @@ no ffprobe -- which is why probing uses OpenCV.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 from contextlib import contextmanager
@@ -308,6 +309,58 @@ def render_still(
             "-update", "1",
             str(dest),
         ],
+        cancel,
+    )
+    return dest
+
+
+def keyframes(path: str | Path, cancel: Canceller | None = None) -> list[float]:
+    """Seconds of every video keyframe, read from the packets without decoding."""
+    code, out, err = _capture(
+        [ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-i", str(path),
+         "-map", "0:v:0", "-c", "copy", "-f", "framecrc", "-"],
+        cancel,
+    )
+    base = re.search(r"#tb 0: (\d+)/(\d+)", out)
+    if code != 0 or base is None:
+        raise RuntimeError(f"Could not read the keyframes of {path}:\n{err.strip()[-300:]}")
+    unit = int(base.group(1)) / int(base.group(2))
+    return sorted(
+        int(line.split(",")[2]) * unit
+        for line in out.splitlines()
+        if line and not line.startswith("#") and "F=" not in line
+    )
+
+
+def cut(
+    path: str | Path, dest: str | Path, start: float, end: float, cancel: Canceller | None = None
+) -> Path:
+    """Copy [start, end) without re-encoding. `start` must be a keyframe.
+
+    Matroska seeks land early and keyframes are compared by their (earlier) decode
+    time, so the input seek is coarse and the exact cut is made on the output side.
+    """
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    coarse = max(0.0, start - 30)
+    args = [ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{coarse:.3f}", "-i", str(path)]
+    if start - coarse > 0.25:
+        args += ["-ss", f"{start - coarse - 0.25:.3f}"]
+    args += ["-to", f"{end - coarse:.3f}", "-map", "0:v:0?", "-map", "0:a?", "-c", "copy",
+             "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(dest)]
+    _run(args, cancel)
+    return dest
+
+
+def thumbnail(
+    path: str | Path, dest: str | Path, timestamp: float, width: int = 320,
+    cancel: Canceller | None = None,
+) -> Path:
+    dest = Path(dest)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _run(
+        [ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{max(0.0, timestamp):.3f}",
+         "-i", str(path), "-frames:v", "1", "-vf", f"scale={width}:-2", "-q:v", "4", str(dest)],
         cancel,
     )
     return dest
