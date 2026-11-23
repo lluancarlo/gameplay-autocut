@@ -24,6 +24,7 @@ from . import pipeline, shorts, video_io
 from .gui import APP_NAME, Worker, ZoomBar, default_output, default_source, same, settings_file
 from .moments import Analysis, clock, find_moments
 from .moments.audio import track_count
+from .moments.labels import ICONS, UNLABELLED
 
 ACCENT = QColor("#24a148")
 CONTEXT_S = 15
@@ -406,9 +407,10 @@ class AnalyseStep(Step):
         self.log.setMaximumBlockCount(300)
         self.log.setFixedHeight(150)
         inner.addWidget(self.log)
-        hint = QLabel("The first time, VVideo downloads its speech and sound models (about 1.7 GB, plus 1.3 GB "
-                      "of GPU libraries on NVIDIA cards). After that, a 30-minute recording takes about a minute, "
-                      "and a recording analysed before opens instantly.")
+        hint = QLabel("VVideo listens to the whole recording and looks at it 10 times a second. The first time, it "
+                      "downloads its speech, sound and vision models (about 1.9 GB, plus 1.3 GB of GPU libraries "
+                      "on NVIDIA cards). After that, a 30-minute recording takes about a minute, and a recording "
+                      "analysed before opens instantly.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: palette(mid);")
         inner.addWidget(hint)
@@ -495,9 +497,13 @@ class HypeCurve(QWidget):
         self.setMinimumHeight(70)
         self.curve: list[float] = []
         self.spans: list[tuple[float, float, bool, bool]] = []
+        self.menu: list[float] = []
 
-    def show_curve(self, curve: list[float], spans: list[tuple[float, float, bool, bool]]) -> None:
+    def show_curve(self, curve: list[float], spans: list[tuple[float, float, bool, bool]],
+                   menu: list[float] | None = None) -> None:
         self.curve, self.spans = curve, spans
+        if menu is not None:
+            self.menu = menu
         self.update()
 
     def paintEvent(self, _event) -> None:
@@ -506,6 +512,10 @@ class HypeCurve(QWidget):
         if not self.curve:
             return
         width, height, count = self.width(), self.height() - 4, len(self.curve)
+        grey = QColor(128, 128, 128, 70)
+        for second, value in enumerate(self.menu[:count]):
+            if value >= 0.5:  # menus, maps, pause screens: never offered as moments
+                painter.fillRect(int(second / count * width), 0, max(1, int(width / count) + 1), self.height(), grey)
         for start, end, current, picked in self.spans:
             colour = QColor(ACCENT)
             colour.setAlpha(150 if current else 95 if picked else 35)
@@ -523,13 +533,21 @@ class HypeCurve(QWidget):
 
 
 class RangeBar(QWidget):
-    changed = Signal(float, float)
+    """The clip on a strip of context. Clicking or dragging moves the playhead inside the clip.
+
+    The bounds are not draggable: they change only through the Start/End ±1s
+    buttons, so a click meant to replay a bit can never shorten the clip.
+    """
+
+    seek = Signal(float)
 
     def __init__(self) -> None:
         super().__init__()
         self.setMinimumHeight(34)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("Click or drag to play from that point. Use the Start / End buttons to trim.")
         self.low, self.high, self.start, self.end, self.playhead = 0.0, 1.0, 0.0, 1.0, 0.0
-        self._dragging: str | None = None
+        self._dragging = False
 
     def set_range(self, low: float, high: float, start: float, end: float) -> None:
         self.low, self.high, self.start, self.end = low, high, start, end
@@ -557,22 +575,20 @@ class RangeBar(QWidget):
         painter.drawLine(int(self._x(self.playhead)), 4, int(self._x(self.playhead)), self.height() - 4)
 
     def mousePressEvent(self, event) -> None:
-        x = event.position().x()
-        self._dragging = "start" if abs(x - self._x(self.start)) <= abs(x - self._x(self.end)) else "end"
+        self._dragging = True
         self.mouseMoveEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        if self._dragging is None:
+        if not self._dragging:
             return
-        seconds = min(max(self._seconds(event.position().x()), self.low), self.high)
-        if self._dragging == "start":
-            self.start = min(seconds, self.end - 1)
-        else:
-            self.end = max(seconds, self.start + 1)
-        self.changed.emit(self.start, self.end)
+        # Inside the clip only: outside it the loop would jump straight back anyway.
+        seconds = min(max(self._seconds(event.position().x()), self.start), max(self.start, self.end - 0.2))
+        self.playhead = seconds
+        self.update()
+        self.seek.emit(seconds)
 
     def mouseReleaseEvent(self, _event) -> None:
-        self._dragging = None
+        self._dragging = False
 
 
 class PickStep(Step):
@@ -603,10 +619,18 @@ class PickStep(Step):
         self.shown_label = QLabel()
         self.shown_label.setMinimumWidth(110)
         top.addWidget(self.shown_label)
+        top.addWidget(QLabel("Type"))
+        self.type_combo = QComboBox()
+        self.type_combo.setMinimumWidth(170)
+        self.type_combo.setToolTip("Show only one kind of moment. The type comes from what was heard: "
+                                   "gunfire, engines and sirens, crashes, shouting or trigger phrases.")
+        self.type_combo.currentIndexChanged.connect(lambda _i: self._filter())
+        top.addWidget(self.type_combo)
         layout.addLayout(top)
 
         self.hype = HypeCurve()
-        self.hype.setToolTip("How strong each second is. Click a shaded moment to play it.")
+        self.hype.setToolTip("How strong each second is, from sound and picture. Click a shaded moment to "
+                             "play it. Grey: menus, maps and pause screens, left out.")
         self.hype.clicked.connect(self._jump_to)
         layout.addWidget(self.hype)
 
@@ -617,7 +641,7 @@ class PickStep(Step):
         self.cards = QListWidget()
         self.cards.setViewMode(QListWidget.ViewMode.IconMode)
         self.cards.setIconSize(THUMB)
-        self.cards.setGridSize(QSize(THUMB.width() + 16, THUMB.height() + 74))
+        self.cards.setGridSize(QSize(THUMB.width() + 16, THUMB.height() + 80))
         self.cards.setResizeMode(QListWidget.ResizeMode.Adjust)
         self.cards.setMovement(QListWidget.Movement.Static)
         self.cards.setWordWrap(True)
@@ -640,8 +664,12 @@ class PickStep(Step):
         self.video = QVideoWidget()
         self.video.setMinimumSize(420, 236)
         player.addWidget(self.video, stretch=1)
+        self.why_label = _elastic(QLabel())
+        self.why_label.setWordWrap(True)
+        self.why_label.setTextFormat(Qt.TextFormat.RichText)
+        player.addWidget(self.why_label)
         self.range_bar = RangeBar()
-        self.range_bar.changed.connect(self._range_changed)
+        self.range_bar.seek.connect(lambda seconds: self.player.setPosition(int(seconds * 1000)))
         player.addWidget(self.range_bar)
         nudges = QHBoxLayout()
         for text, edge, delta in (("-1s", "start", -1), ("+1s", "start", 1), (None, None, 0),
@@ -691,31 +719,54 @@ class PickStep(Step):
             item.setData(Qt.ItemDataRole.UserRole, index)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
-            item.setToolTip(", ".join(moment.reasons))
+            item.setToolTip(moment.explanation or ", ".join(moment.reasons))
             self.cards.addItem(item)
             self._label(item)
         self.cards.blockSignals(False)
+        self._fill_types()
+        seen = analysis.vision
+        looked = (f" · {seen['frames']:,} frames seen ({seen['fps']:g}/s, {seen['provider']})" if seen
+                  else " · sound only")
+        if seen and seen.get("menu_seconds"):
+            looked += f" · {clock(seen['menu_seconds'])} of menus and maps left out (grey)"
         self.summary.setText(f"<b>{analysis.path.name}</b> · {len(analysis.moments)} moments in "
-                             f"{clock(analysis.duration)} · tick the ones you want as shorts")
+                             f"{clock(analysis.duration)}{looked} · tick the ones you want as shorts")
+        plain = self.summary.text().replace("<b>", "").replace("</b>", "")
+        self.summary.setToolTip(plain.replace(" · ", chr(10)))
         self.range_label.setText("Click a moment to play it.")
+        self.why_label.setText("")
         self._filter()
+
+    def _fill_types(self) -> None:
+        counts: dict[str, int] = {}
+        for moment in self.analysis.moments:
+            counts[moment.label] = counts.get(moment.label, 0) + 1
+        self.type_combo.blockSignals(True)
+        self.type_combo.clear()
+        self.type_combo.addItem(f"All types ({len(self.analysis.moments)})", None)
+        for label in sorted(counts, key=lambda k: (k == UNLABELLED, -counts[k])):
+            self.type_combo.addItem(f"{ICONS.get(label, '')} {label} ({counts[label]})", label)
+        self.type_combo.blockSignals(False)
 
     def _label(self, item: QListWidgetItem) -> None:
         index = item.data(Qt.ItemDataRole.UserRole)
         moment = self.analysis.moments[index]
         start, end = self.ranges[index]
-        reasons = ", ".join(moment.reasons[:3])
-        item.setText(f"#{index + 1} · score {moment.score}\n{clock(start)} · {end - start:.0f}s\n{reasons}")
+        # No emoji on the card itself: in icon mode Qt measures the line without the emoji font's
+        # height and elides everything after it. The filter and the line under the player keep them.
+        kind = moment.label.upper() + (f" · {moment.label2}" if moment.label2 else "")
+        item.setText(f"#{index + 1} · score {moment.score}\n{kind}\n{clock(start)} · {end - start:.0f}s")
 
     def _filter(self) -> None:
         self.prefs.set("app/min_score", self.min_score.value())
         if self.analysis is None:
             return
-        limit = self.min_score.value()
+        limit, kind = self.min_score.value(), self.type_combo.currentData()
         shown = 0
         for row in range(self.cards.count()):
             item = self.cards.item(row)
-            hidden = self.analysis.moments[item.data(Qt.ItemDataRole.UserRole)].score < limit
+            moment = self.analysis.moments[item.data(Qt.ItemDataRole.UserRole)]
+            hidden = moment.score < limit or (kind is not None and moment.label != kind)
             item.setHidden(hidden)
             shown += not hidden
         self.shown_label.setText(f"{limit} · {shown} of {self.cards.count()}")
@@ -729,7 +780,7 @@ class PickStep(Step):
         spans = [(start, end, index == self.current, index in picked)
                  for index, (start, end) in enumerate(self.ranges)
                  if self.analysis.moments[index].score >= limit or index in picked]
-        self.hype.show_curve(self.analysis.curve, spans)
+        self.hype.show_curve(self.analysis.curve, spans, self.analysis.signals.get("menu", []))
 
     def _jump_to(self, seconds: float) -> None:
         for row in range(self.cards.count()):
@@ -755,6 +806,10 @@ class PickStep(Step):
         high = min(self.analysis.duration, end + CONTEXT_S)
         self.range_bar.set_range(low, high, start, end)
         self.range_label.setText(f"{clock(start)} → {clock(end)} · {end - start:.1f}s")
+        moment = self.analysis.moments[self.current]
+        level = f" <span style='color:#8d8d8d'>· {moment.level} confidence</span>" if moment.level else ""
+        self.why_label.setText(f"<b>{ICONS.get(moment.label, '')} #{self.current + 1}</b> "
+                               f"{moment.explanation}{level}")
         item = self.cards.currentItem()
         if item is not None:
             self._label(item)
@@ -807,7 +862,7 @@ class PickStep(Step):
 
     def _next(self) -> None:
         picked = sorted(self.picked_indices(), key=lambda i: self.ranges[i][0])
-        clips = [(*self.ranges[i], self.analysis.moments[i].peak) for i in picked]
+        clips = [(*self.ranges[i], self.analysis.moments[i].peak, self.analysis.moments[i].label) for i in picked]
         if clips:
             self.proceed.emit(clips)
 
@@ -902,7 +957,7 @@ class ShortsStep(Step):
         super().__init__()
         self.prefs = prefs
         self.analysis: Analysis | None = None
-        self.clips: list[tuple[float, float, float]] = []
+        self.clips: list[tuple[float, float, float, str]] = []
         self.written: list[Path] = []
         self.render_runner = JobRunner(self)
         self.render_runner.message.connect(self._message)
@@ -983,17 +1038,18 @@ class ShortsStep(Step):
         right.addLayout(buttons)
         layout.addLayout(right, 1)
 
-    def prepare(self, analysis: Analysis, clips: list[tuple[float, float, float]]) -> None:
+    def prepare(self, analysis: Analysis, clips: list[tuple[float, float, float, str]]) -> None:
         self.analysis, self.clips, self.written = analysis, clips, []
-        total = sum(end - start for start, end, _peak in clips)
+        total = sum(end - start for start, end, _peak, _label in clips)
         self.summary.setText(f"{len(clips)} clip{'s' if len(clips) != 1 else ''} from <b>{analysis.path.name}</b> · "
                              f"{total:.0f}s in all · 1080×1920 MP4")
         self.clip_list.clear()
         self.preview_combo.blockSignals(True)
         self.preview_combo.clear()
-        for number, (start, end, _peak) in enumerate(clips, start=1):
+        for number, (start, end, _peak, label) in enumerate(clips, start=1):
             name = pipeline.moment_name(analysis.path, start)
-            self.clip_list.addItem(f"{number}.  {clock(start)} → {clock(end)}  ({end - start:.0f}s)   →  {name}")
+            self.clip_list.addItem(f"{number}.  {ICONS.get(label, '')} {label:<12} {clock(start)} → {clock(end)}  "
+                                   f"({end - start:.0f}s)   →  {name}")
             self.preview_combo.addItem(f"clip {number} · {clock(start)}", number - 1)
         self.preview_combo.blockSignals(False)
         self.bar.setRange(0, 100)
@@ -1033,7 +1089,7 @@ class ShortsStep(Step):
             self._preview_again = True
             return
         source = self.analysis.path
-        _start, _end, peak = self.clips[self.preview_combo.currentData()]
+        peak = self.clips[self.preview_combo.currentData()][2]
         dest = self.analysis.cache / "preview.png"
         try:
             settings = Framing.from_prefs(self.prefs)
@@ -1085,7 +1141,7 @@ class ShortsStep(Step):
     def _generate(self) -> None:
         if self.analysis is None:
             return
-        source, clips, dest = self.analysis.path, [(s, e) for s, e, _p in self.clips], self._dest()
+        source, clips, dest = self.analysis.path, [(c[0], c[1]) for c in self.clips], self._dest()
         self.prefs.set("app/dest", str(dest))
         try:
             settings = Framing.from_prefs(self.prefs)

@@ -1,10 +1,58 @@
 {
-  "clip": {"min": 10, "ideal": 20, "max": 30, "setup": 5, "tail": 2, "extent": 0.5},
+  "clip": {"min": 10, "ideal": 20, "max": 45, "setup": 5, "tail": 2, "extent": 0.5,
+           "onset": {"signals": ["action", "vision", "vehicle", "siren", "crash", "loudness"],
+                     "level": 0.3, "gap_s": 5, "lookback_s": 35, "pre_roll_s": 5}},
+  "_clip_note": "A clip opens where the action starts: from the peak, walk back through the run of seconds where any onset signal is >= level (pauses up to gap_s allowed, at most lookback_s), then pre_roll_s more. max is the longest a clip may become for that; the end is trimmed first. A clip never opens or closes on a menu/map/pause second.",
   "peaks": {"min_gap": 20, "floor": 0.08, "full_score": 0.6},
   "smooth_sigma": 2.0,
   "agreement_bonus": 0.15,
 
-  "weights": {"loudness": 0.30, "reaction": 0.30, "action": 0.20, "speech": 0.20, "keywords": 0.25},
+  "weights": {"loudness": 0.30, "reaction": 0.30, "action": 0.20, "speech": 0.20, "keywords": 0.25,
+              "vehicle": 0.0, "siren": 0.0, "crash": 0.0, "vision": 0.25, "novelty": 0.0},
+  "_weights_note": "A weight of 0 keeps a curve out of the score entirely (it still feeds the labels). vehicle, siren and crash start at 0 until the evaluation (tools/evaluate.py) shows they help.",
+
+  "vision": {"enabled": true, "fps": 10, "cpu_fps": 2, "batch": 64, "decode": "auto", "nvdec_codecs": ["hevc", "av1"]},
+  "_vision_note": "SigLIP 2 pass (milestone M2): frames sampled per second of video and encoded on the GPU (DirectML), or at cpu_fps on machines without one. decode 'auto' uses NVDEC for the codecs listed (measured faster there) and the CPU otherwise; 'cpu' or 'nvdec' force one. The embeddings are cached; from M3 on they feed the moments.",
+
+  "sound_groups": {
+    "reaction": ["Shout", "Bellow", "Whoop", "Yell", "Battle cry", "Screaming", "Laughter", "Giggle", "Belly laugh",
+                 "Chuckle, chortle", "Cheering"],
+    "gunfire": ["Gunshot, gunfire", "Machine gun", "Fusillade", "Artillery fire", "Cap gun"],
+    "explosion": ["Explosion", "Boom", "Burst, pop"],
+    "vehicle": ["Vehicle", "Motor vehicle (road)", "Car", "Race car, auto racing", "Motorcycle", "Truck", "Engine",
+                "Accelerating, revving, vroom", "Skidding", "Tire squeal", "Car passing by", "Vehicle horn, car horn, honking"],
+    "siren": ["Siren", "Police car (siren)", "Ambulance (siren)", "Fire engine, fire truck (siren)", "Emergency vehicle",
+              "Civil defense siren"],
+    "crash": ["Smash, crash", "Breaking", "Shatter", "Glass", "Crushing"]
+  },
+  "_sound_groups_note": "AudioSet class names exactly as in CED's class_labels_indices.csv. gunfire + explosion together are the 'action' curve.",
+
+  "labels": {
+    "present": 0.3,
+    "rules": {
+      "combat": {"signals": {"gunfire": [0.35, 2], "explosion": [0.35, 2], "see:combat": [0.5, 2], "see:explosion": [0.5, 1]}},
+      "vehicle": {"signals": {"vehicle": [0.35, 4], "siren": [0.35, 2], "see:vehicle": [0.5, 3], "see:police": [0.5, 2]}},
+      "destruction": {"signals": {"crash": [0.3, 1], "see:destruction": [0.5, 2]}},
+      "unusual": {"signals": {"see:water": [0.5, 2]}},
+      "reaction": {"signals": {"reaction": [0.45, 1], "keyword": [0.45, 1]}}
+    },
+    "escape": {"enabled": false, "calm_s": 8, "calm_below": 0.3}
+  },
+  "_labels_note": "Each rule maps a signal to [min_value, min_seconds]: sound groups by probability (>= present counts as present), see:<concept> by the relative vision curve. A moment gets the label whose best evidence clears its bar by the widest margin (>= 2 high, >= 1.4 medium, else low); a label carried by the picture alone is capped at low. Nothing qualifying = unlabelled. 'escape' (vehicle + siren followed by calm) stays off until reviewed data shows it is precise.",
+
+  "visual": {
+    "concepts": {"baseline_s": 120, "floor": 2.0, "span": 4.0, "present_floor": -5.0, "present_span": 2.0},
+    "novelty": {"window_s": 10, "baseline_s": 120, "floor": 0.02, "span": 0.15},
+    "menu": {"floor": 0.0, "span": 2.0},
+    "suppress": 0.9,
+    "skip_menu_peaks": 0.75,
+    "menu_run": {"level": 0.75, "seconds": 3},
+    "motion": {"top": 20, "fps": 10, "floor": 2.0, "span": 6.0},
+    "lead": {"level": 0.25, "seconds": 8, "gap_s": 3},
+    "dedupe_cos": 0.95,
+    "merge_gap_s": 5
+  },
+  "_visual_note": "M3. concepts: SigLIP logit minus its rolling median, above `floor`, scaled by `span` (logit units). menu: (menu - ordinary) logit margin -> 0..1; the score is multiplied by (1 - suppress * menu) and a moment whose peak is that sure of being a menu is dropped. present_floor: a concept must also reach this absolute logit (SigLIP's own scale) to count. motion: optical flow on the `top` moments only; the median residual (local) motion, minus `floor` px/frame at 320 px width, over `span`. dedupe: same-label moments that look alike (cosine of their mean frames) or nearly touch are merged.",
   "loudness": {"baseline_s": 60, "floor_db": 3, "span_db": 9},
   "reaction": {"full": 0.45},
   "action": {"baseline_s": 60, "span": 0.4},

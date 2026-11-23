@@ -68,7 +68,8 @@ def run_detector(rec: m.Recording, save: Path, *, log=_ignore, progress=_ignore,
         "language": analysis.language,
         "moments": [
             {"start": x.start, "end": x.end, "peak": x.peak, "score": x.score, "reasons": x.reasons,
-             **({"label": x.label} if hasattr(x, "label") else {}),
+             **({"label": x.label, "label2": x.label2, "level": x.level, "explanation": x.explanation}
+                if hasattr(x, "label") else {}),
              **({"confidence": x.confidence} if getattr(x, "confidence", None) is not None else {})}
             for x in analysis.moments
         ],

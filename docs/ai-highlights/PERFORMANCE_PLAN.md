@@ -35,6 +35,16 @@ Limits of these measurements: H.264 only (no HEVC/AV1 sample was tested), one or
 concurrent load, no per-window seeking. The full matrix is milestone **M2b**; until it runs, the
 decode policy is "CPU unless measured otherwise", **not** "GPU because it is a GPU".
 
+## 1b. Measured in M2 (2026-11-23)
+
+| What | Result |
+|---|---|
+| SigLIP 2 base image encoder, batch 64 | CPU 22 img/s (fp32), 18 (fp16) · **DirectML 312 (fp32), 726 (fp16)** · CUDA EP failed (cuDNN init) |
+| 10 fps frame pipeline, 60 s, CPU vs NVDEC | H.264 3440×1440p60 12× vs 6× · HEVC 5× vs 12× · AV1 0.8× vs 5.6× · 1080p H.264 72× vs 31× · HEVC 37× vs 40× · AV1 4.7× vs 25× (× realtime) |
+| Full visual pass, GTA-6 15:32 1080p30 H.264, 10 fps | 9,318 frames in 19 s (481/s) — decode-bound |
+| 60 s 3440×1440p60, 10 fps | AV1 (NVDEC) 10.5 s · H.264 (CPU) 4.8 s |
+| Cache size at 10 fps | ~14 MB per 15 min (float16, 768-d) |
+
 ## 2. Linear extrapolations from the measurements
 
 Clearly **extrapolated**, not measured:

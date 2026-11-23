@@ -41,10 +41,11 @@ def main(argv: list[str] | None = None) -> int:
     analysis = find_moments(source, track=args.track, voice_track=args.voice_track,
                             fresh=args.fresh, log=print)
     shown = [m for m in analysis.moments if m.score >= args.min_score]
-    print("\n  #  score  start     end       length  reasons")
+    print("\n  #  score  start     end       length  label                 why")
     for index, moment in enumerate(shown, start=1):
+        label = moment.label + (f" ({moment.level})" if moment.level else "")
         print(f"{index:>3}  {moment.score:>5}  {clock(moment.start):<8}  {clock(moment.end):<8}  "
-              f"{moment.length:>5.0f}s  {', '.join(moment.reasons)}")
+              f"{moment.length:>5.0f}s  {label:<20}  {moment.explanation}")
     if args.json:
         Path(args.json).write_text(json.dumps(analysis.to_json(), ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"\n  -> {args.json}")

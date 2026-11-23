@@ -44,6 +44,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip uninstall -y onnxruntime
+          pip install -r requirements-vision.txt
+          python -c "import onnxruntime as o; assert 'DmlExecutionProvider' in o.get_available_providers(), o.get_available_providers()"
 
       - name: Build VVideo.exe
         run: pyinstaller VVideo.spec --noconfirm --clean

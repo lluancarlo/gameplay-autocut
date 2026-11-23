@@ -5,6 +5,100 @@ no application code, dependency or model has changed.
 
 ---
 
+## Revision 7 — 2026-11-23 — M3 implemented (visual detection)
+
+- `src/moments/visual.py`: per-second concept logits (max over the 10 frames of each second), **relative** curves
+  (logit − 120 s rolling median, above `floor`) **gated by presence** (absolute logit ≥ −5 → 1 at −3). Without the
+  gate "police cars chasing a car" fired on every GTA drive. Semantic novelty (1 − cos to the previous 10 s) is a
+  separate curve. Menu/map/pause detector: (non_gameplay − ordinary) logit margin, AUC 0.914 on the GTA-6 draft
+  menu spans (non_gameplay alone 0.840); at margin ≥ 1, precision 0.77 / recall 0.78.
+- Fusion: new `vision` curve (strongest event concept, menus removed) at **weight 0.25**; `novelty` at **0** (it lowered
+  nDCG@10 on the draft set); score multiplied by (1 − 0.9 × menu); peaks that are ≥ 0.75 sure to be a menu are dropped.
+- `src/moments/motion.py`: DIS optical flow on the top 20 moments (decoded grey, 320 px, 10 fps), RANSAC similarity
+  model = camera motion, residual = local motion, static-HUD mask. Calibration: the 90th-percentile residual was
+  noise (16 px/frame on a parked-car scene); the **median** residual separates — meditation 0.2, driving 0.3, the
+  bridge jump 5.6, a The Finals gunfight 7. Evidence only from (local − 2) / 6 ≥ 0.5; never labels on its own.
+- Labels: rules are per signal `[min_value, min_seconds]`; new label `unusual` (see:water); **event labels take
+  precedence over `reaction`**; **picture-only labels are capped at "low"** unless sound, speech or motion agree;
+  `escape` rule implemented, **off** (no reviewed chase data to prove it).
+- Bounds: picture-led moments start `lead` (8 s) before the concept's run begins, stepping over dropouts up to
+  3 s (the murky underwater frame read as a "menu" for 3 s). Same-label moments that nearly touch are merged;
+  same-label look-alikes (cos > 0.95) dropped.
+- UI: step 3 curve greys menus/maps/pause; summary says how much was left out; new type 🌀 unusual; explanations
+  include "looks like …", "sudden change on screen", "fast movement in the scene".
+- Measured on GTA-6: the bridge jump — missed by the audio detector — is now **#1**, "Unusual (water) — looks like a
+  person jumping into water, much louder than usual, sudden change on screen", high confidence, 03:57–04:27 (the
+  fall is at ~04:00). 1:55 of menus and maps detected; 3 menu peaks dropped. Re-analysis of a cached recording: ~8 s.
+- **Gate: not passable yet.** On the single draft-labelled recording, relevance did not move (p@5 40 %, p@10 30 %,
+  recall 60 % at every vision weight tried; nDCG@10 0.45 → 0.42; strict recall 0.40 → 0.20 — one moment out of five).
+  The draft label for the jump (03:40–04:10, drawn from 5 s contact sheets, including the dare beforehand) is
+  matched to the neighbouring "prank" truth instead, which is a label-quality problem as much as a detector one.
+  **Decision D35:** keep vision on by default (qualitatively clearly better, no labelled evidence against it) and
+  re-run the gate as soon as reviewed labels and a holdout recording exist. Reverting is one config line
+  (`weights.vision: 0`).
+- M3b (X-CLIP comparison) not run: it is a separate, dev-only experiment.
+
+## Revision 6 — 2026-11-23 — M2 implemented (vision foundation)
+
+Decisions (all measured on the target machine unless marked):
+
+- **D27 — sampling at 10 frames/s** for the whole recording (user decision; plan said 1–2 fps dense + 4–8 fps
+  adaptive). Cost measured below; `cpu_fps` = 2 on machines without a usable GPU. Configurable in
+  `config/moments.json` → `vision`.
+- **D28 — model:** `google/siglip2-base-patch16-224` (Apache-2.0, confirmed from the repo's own metadata), image tower
+  only, as the `onnx-community` ONNX export pinned at revision `ba1f3b0`, fp16 file (186 MB, SHA-256 checked).
+  **No PyTorch anywhere** — the text tower runs once in the dev tool `tools/build_prompt_bank.py`.
+- **D29 — runtime: ONNX Runtime DirectML 1.24.4** replaces the CPU `onnxruntime` wheel (option B of
+  MODEL_EVALUATION §7.3). Throughput, batch 64: CPU 22 img/s (fp32) / 18 (fp16); **DirectML 312 (fp32) / 726 (fp16)**;
+  CUDA EP (`onnxruntime-gpu` 1.26 with pip CUDA/cuDNN) **failed** to initialise cuDNN and fell back to CPU. DirectML
+  needs no CUDA DLLs and works on any DX12 GPU. CED (sherpa-onnx's own ORT), Whisper's VAD (now on the DirectML wheel's
+  CPU provider) and the vision model were verified together in one process (risk R3 closed on this machine).
+- **D30 — preprocessing:** ffmpeg `format=rgb24,scale=224:224:flags=bilinear` (RGB conversion **before** resizing).
+  Against the reference PIL bilinear: pixel MAE 0.07–0.10/255, embedding cos ≥ 0.9993 on 4 GTA-6 frames
+  (resizing in YUV first gave 0.976–0.997). DirectML fp16 vs CPU fp32 embeddings: cos 1.0000.
+- **D31 — tokenizer:** Gemma `tokenizer.json` pads to 64 and appends EOS, but does **not** lowercase ("A Photo" and
+  "a photo" differ) — the bank builder lowercases explicitly. `logit_scale` = exp(4.72445) and `logit_bias` = −16.77172
+  read from the Google checkpoint's safetensors header at revision `75de2d5`.
+- **D32 — decode policy (M2b):** 10 fps pipeline, 60 s samples, CPU vs NVDEC: H.264 3440×1440p60 12× vs 6× realtime,
+  HEVC 5× vs 12×, **AV1 0.8× vs 5.6×**; 1080p: H.264 72× vs 31×, HEVC 37× vs 40×, AV1 4.7× vs 25×. → `decode: auto`
+  uses NVDEC for HEVC/AV1 when an NVIDIA GPU is present, the CPU otherwise.
+- **D33 — prompt bank** `config/events.json` → `config/events.npz` (24 prompts, 8 concepts), carrying the image encoder's
+  SHA-256 and the events.json hash; the app refuses a mismatched bank.
+- **D34 — `VVideo.exe --self-test`** writes `VVideo-data/self-test.json` (ffmpeg, ORT providers, a real vision
+  inference, prompt bank, sound model, Whisper runtime). Passed on the frozen build on the target machine.
+
+Measured: GTA-6 (15:32, 1080p30 H.264) visual pass 9,318 frames in 19 s (481 frames/s, decode-bound); 60 s of
+3440×1440p60 AV1 in 10.5 s, H.264 in 4.8 s. Cache: ~14 MB per 15 min at 10 fps (float16).
+
+Sanity check against the draft GTA-6 labels (per-second concept scores, no tuning, indicative only): bridge-jump
+`water` AUC 0.97 — the 5 highest seconds of the whole video are 04:05–04:20, the moment the audio detector missed;
+`vehicle` vs driving stretches AUC 0.92; `non_gameplay` vs menu spans AUC 0.83.
+
+Not affecting the moments yet: the embeddings are cached and reported (step 2 log, step 3 summary); M3 fuses them.
+
+Still open: clean-environment validation (no-GPU VM, NVIDIA driver-only profile) — run `VVideo.exe --self-test` there.
+New risk **R15**: onnxruntime-directml is pinned at 1.24.4 (DirectML is in maintenance upstream); CUDA EP remains a
+fallback to revisit if DirectML stalls.
+
+## Revision 5 — 2026-11-23 — M1 implemented (audio labels)
+
+- CED now keeps all 527 class probabilities per second (`sounds.npz`, float16, ~4 MB/hour); sound groups
+  (`reaction`, `gunfire`, `explosion`, `vehicle`, `siren`, `crash`) are defined by AudioSet class name in
+  `config/moments.json` and can change without re-listening. A test checks every name exists in the model.
+- New relative curves `vehicle`, `siren`, `crash`, at **weight 0** (`engine.fuse` ignores zero-weight curves, so
+  relevance is identical to the baseline — verified on the evaluation set and by a unit test). On the draft GTA-6
+  labels, weights 0.2–0.3 lowered p@10 (30 → 20 %) and recall (60 → 40 %), so they stay at 0 until reviewed data
+  says otherwise.
+- Every moment gets `label` (combat / vehicle / destruction / reaction / unlabelled), `label2`, `level`
+  (low / medium / high — not a calibrated probability), `label_score`, `evidence` and a one-line `explanation`
+  (`src/moments/labels.py`, rules in `config/moments.json`).
+- UI: step 3 cards show the type, a **Type** filter with counts, and the explanation with its level under the
+  player; step 4 lists each clip's type. `find-moments.py` prints label and explanation.
+- Gate (draft labels, 1 recording — indicative only): relevance unchanged; classification on matched moments went
+  from 0 % labelled to: reaction P 80 % / R 67 % (n = 6), vehicle 1/1; 25 % left unlabelled.
+- Old analysis caches (`sounds.json`) are not reused: the first analysis of a recording after this update re-runs
+  the sound model (seconds), Whisper's cache is kept.
+
 ## Revision 4 — 2026-11-23 — app restructured as a four-step auto-clipper
 
 - Decision **D26**: the app is one guided flow — 1 Video → 2 Find clips → 3 Pick clips → 4 Make shorts — in

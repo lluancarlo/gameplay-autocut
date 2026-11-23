@@ -135,7 +135,7 @@ package is picked up through the import graph (faster-whisper → vad).
 | **C. Keep CPU ORT, run vision in a separate worker process** with its own ORT-GPU | Child process, own site-packages | No in-process conflict | Two Python runtimes in the bundle; IPC; much larger build |
 | **D. CPU only for vision** | Keep today's packages | Zero packaging work | Viable only if M2 shows CPU SigLIP base is fast enough at 1–2 fps |
 
-**Recommendation:** decide in **M2** by measurement, in this order: try **D** (cost of CPU inference
+**Decided in M2 (CHANGELOG revision 6): option B, onnxruntime-directml 1.24.4** — CUDA EP failed to initialise cuDNN; DirectML ran fp16 at 726 img/s. Original recommendation: decide in **M2** by measurement, in this order: try **D** (cost of CPU inference
 for the dense pass), then **A** for the NVIDIA path, with **B** as the fallback for non-NVIDIA GPUs.
 Whichever is chosen must pass the **clean-environment validation** (§7.4). The second ORT copy inside
 sherpa-onnx already coexists with the Python ORT today (both run in one process); whether it still does

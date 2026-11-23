@@ -30,7 +30,9 @@ CONF["distpath"] = SPECPATH
 datas = [("config", "config"), ("vvideo-icon.png", ".")]
 datas += collect_data_files("imageio_ffmpeg")
 datas += collect_data_files("faster_whisper")
-binaries = collect_dynamic_libs("ctranslate2") + collect_dynamic_libs("sherpa_onnx")
+# onnxruntime-directml: onnxruntime.dll and DirectML.dll for the vision model (M2).
+binaries = (collect_dynamic_libs("ctranslate2") + collect_dynamic_libs("sherpa_onnx")
+            + collect_dynamic_libs("onnxruntime"))
 
 a = Analysis(
     ["VVideo.py"],

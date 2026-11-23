@@ -23,12 +23,20 @@ The window walks you through them; each step moves on by itself.
 1. **Video** — choose (or drop) a recording. If OBS put your microphone on its
    own audio track, say which one: reactions are then found in your voice rather
    than in the game's dialogue.
-2. **Find clips** — VVideo analyses the sound: loudness, shouts and laughter,
+2. **Find clips** — VVideo looks at the video 10 times a second (SigLIP 2 on
+   the GPU through DirectML: car chases, gunfights, explosions, wrecks, people
+   in water, menus to leave out), measures motion in the best moments, and
+   analyses the sound: loudness, shouts and laughter,
    gunfire and explosions, fast speech and trigger phrases ("no way", "não
    acredito"...). A progress bar and a short log show where it is. **Cancel**
    goes back to step 1.
-3. **Pick clips** — every moment is a card with a frame, a score and why it was
-   picked; the hype curve shows the whole recording. Click a card to loop it,
+3. **Pick clips** — every moment is a card with a frame, a score and its type
+   (combat, vehicle, destruction, unusual, reaction, or unlabelled) — found from
+   the sound and the picture; **Type** filters
+   by it, and the line under the player says why it was picked ("Combat
+   (machine gun) — machine gun for 6s, \"no way\"") and how sure that is.
+   The hype curve shows the whole recording; grey stretches are menus, maps and
+   pause screens, which are never offered. Click a card to loop it,
    drag the ends of the bar (or ±1 s) to trim it, tick the ones you want and
    press **Make shorts**. **Minimum score** hides the weaker ones.
 4. **Make shorts** — a preview of a picked clip already in vertical.
@@ -59,7 +67,9 @@ Input formats: `.mp4`, `.mkv`, `.mov`, `.avi`, `.webm`, `.flv`, `.m4v`, `.ts`.
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-pip install -r requirements-cuda.txt   # optional: Whisper on an NVIDIA GPU
+pip uninstall -y onnxruntime                # replaced by the DirectML build below
+pip install -r requirements-vision.txt      # vision model on any DirectX 12 GPU
+pip install -r requirements-cuda.txt        # optional: Whisper on an NVIDIA GPU
 python VVideo.py
 ```
 
@@ -111,8 +121,8 @@ and only settings you actually changed go in it. Models and the analysis cache
 live in `VVideo-data\`, also beside the executable; a recording analysed before
 opens instantly. Delete both and the machine is back to never having run VVideo.
 
-The first analysis downloads the sound model (45 MB), Whisper large-v3-turbo
-(1.6 GB) and, in the `.exe` on a machine with an NVIDIA GPU, the CUDA libraries
+The first analysis downloads the sound model (45 MB), the SigLIP 2 vision
+model (186 MB), Whisper large-v3-turbo (1.6 GB) and, in the `.exe` on a machine with an NVIDIA GPU, the CUDA libraries
 Whisper needs (1.3 GB). Without an NVIDIA GPU it uses Whisper small on the CPU.
 A 30-minute recording takes under a minute on an RTX 4080.
 

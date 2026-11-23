@@ -46,6 +46,8 @@ flowchart LR
 
 ## M1 — Audio quick wins and richer `Moment` (P) — 0.5–1 week
 
+- **Status (2026-11-23): implemented** — see CHANGELOG revision 5. New curves at weight 0 pending reviewed data.
+
 - **Objective:** more categories from models we already ship; data structures ready for labels.
 - **Files:** `src/moments/sounds.py` (new groups, full 527-d vector), `src/moments/engine.py`
   (`Evidence`, `label`, `confidence`, `explanation`; `sounds.npz`), `src/moments/signals.py`
@@ -57,6 +59,8 @@ flowchart LR
 - **Tests:** group mapping; evidence ranking; JSON round-trip with and without new fields.
 
 ## M2 — Runtime spike, frames, SigLIP validation, cache (P) — 1.5–2 weeks
+
+- **Status (2026-11-23): implemented** — see CHANGELOG revision 6 (DirectML, 10 fps, decode policy, self-test). Open: clean-environment validation.
 
 Three parts; the first two are spikes whose outcome is a written decision.
 
@@ -88,6 +92,8 @@ Three parts; the first two are spikes whose outcome is a written decision.
 - **Tests:** frame timestamps on a generated `lavfi` video; cache-key invalidation; bank metadata checks; OOM back-off (mocked).
 
 ## M3 — Zero-shot fusion, adaptive pass, motion (P) — 2–2.5 weeks → **prototype demo**
+
+- **Status (2026-11-23): implemented** — CHANGELOG revision 7. Dense pass is already 10 fps (D27), so the adaptive pass is used for motion only. Gate pending reviewed labels + holdout (D35).
 
 - **Objective:** visual evidence inside the existing engine, with labels that abstain when unsure.
 - **Files:** new `src/moments/concepts.py`, `src/moments/novelty.py`, `src/moments/motion.py`, `src/moments/classify.py`;
